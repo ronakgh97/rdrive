@@ -1,4 +1,5 @@
 use crate::service::get_storage_path;
+use crate::{info, warn};
 use anyhow::Result;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Request};
@@ -25,10 +26,10 @@ lazy_static! {
 
 async fn create_router() -> Router {
     Router::new()
-        .route("/status/:id", get(status_handler))
+        .route("/status", get(status_handler))
         .route("/upload", post(upload_handler))
-        .route("/download/:id", get(download_handler))
-        .layer(DefaultBodyLimit::max(1 * 1024 * 1024 * 1024)) // Set max body size to 1GB
+        .route("/download/{*id}", get(download_handler))
+        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024)) // Set max body size to 1GB
 }
 
 pub async fn start_server(port: u16) -> Result<()> {
@@ -37,6 +38,8 @@ pub async fn start_server(port: u16) -> Result<()> {
     let now = chrono::Local::now();
     START_TIME.get_or_init(|| now);
     let addr = format!("0.0.0.0:{}", port);
+
+    info!("Server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router).await?;
@@ -130,9 +133,13 @@ pub async fn upload_handler(request: Request<Body>) -> impl IntoResponse {
     // Register the ongoing upload task
     ON_GOINGS.insert(file_id.clone(), file_hash.to_string());
 
-    println!(
-        "Received upload request: filename={}, size={} bytes, hash={}, key={}, file_id={}",
-        filename, file_size, file_hash, file_key, file_id
+    info!(
+        "Upload request: filename: {}, size: {} bytes, hash: {}, key: {}, file_id: {}",
+        filename,
+        file_size,
+        file_hash.dimmed(),
+        file_key.dimmed(),
+        file_id.dimmed()
     );
 
     let mut stream = request.into_body().into_data_stream();
@@ -183,25 +190,24 @@ pub async fn upload_handler(request: Request<Body>) -> impl IntoResponse {
     let computed_hash = format!("{:x}", hasher.finalize());
 
     if computed_hash != file_hash {
-        println!(
+        warn!(
             "Hash mismatch for file_id={}: expected {}, got {}",
-            file_id, file_hash, computed_hash
+            file_id,
+            file_hash,
+            computed_hash.bold()
         );
 
         ON_GOINGS.remove(&file_id);
         // Clean up the uploaded file if hash verification fails
         tokio::fs::remove_file(&path).await.unwrap();
         return (
-            StatusCode::BAD_REQUEST,
-            Json(UploadStatus {
-                file_id,
-                time_took: 0.0,
-            }),
+            StatusCode::NOT_ACCEPTABLE,
+            "Hash mismatch".to_string().into_response(),
         );
     }
 
     if received_bytes != file_size {
-        println!(
+        warn!(
             "Size mismatch for file_id={}: expected {} bytes, got {} bytes",
             file_id, file_size, received_bytes
         );
@@ -210,13 +216,18 @@ pub async fn upload_handler(request: Request<Body>) -> impl IntoResponse {
         // Clean up the uploaded file if size verification fails
         tokio::fs::remove_file(&path).await.unwrap();
         return (
-            StatusCode::BAD_REQUEST,
-            Json(UploadStatus {
-                file_id,
-                time_took: 0.0,
-            }),
+            StatusCode::PARTIAL_CONTENT,
+            "Size mismatch for file_id={}: expected {} bytes, got {} bytes"
+                .to_string()
+                .into_response(),
         );
     }
+
+    info!(
+        "Upload completed: file_id: {}, time_took: {} seconds",
+        file_id,
+        time_start.elapsed().as_secs_f64()
+    );
 
     // Save Hash and key
     let metadata = Metadata {
@@ -240,17 +251,26 @@ pub async fn upload_handler(request: Request<Body>) -> impl IntoResponse {
     // Remove the ongoing task from the map after completion
     ON_GOINGS.remove(&file_id);
 
-    (StatusCode::OK, Json(UploadStatus { file_id, time_took }))
+    (
+        StatusCode::OK,
+        Json(UploadStatus { file_id, time_took }).into_response(),
+    )
 }
 
 type DownloadResult = Result<Response<Body>, (StatusCode, String)>;
 
 pub async fn download_handler(Path(id): Path<String>, headers: HeaderMap) -> DownloadResult {
     // TODO: Implement file key validation and authentication later
-    let _file_key = headers
+    let file_key = headers
         .get("x-file-key")
         .and_then(|v| v.to_str().ok())
         .ok_or((StatusCode::BAD_REQUEST, "Missing file key".to_string()))?;
+
+    info!(
+        "Download request: file_id: {}, file_key: {}",
+        id,
+        file_key.dimmed()
+    );
 
     let sanitized_id = id
         .replace("-", "_")
@@ -258,9 +278,12 @@ pub async fn download_handler(Path(id): Path<String>, headers: HeaderMap) -> Dow
         .replace(".", "_")
         .replace("\\", "_");
 
-    let storage_path = get_storage_path()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let storage_path = get_storage_path().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Server says sorry >.<".to_string(),
+        )
+    })?;
 
     let meta_path = storage_path.join(format!("{}.meta", &sanitized_id));
     let file_path = storage_path.join(&sanitized_id);
@@ -282,6 +305,11 @@ pub async fn download_handler(Path(id): Path<String>, headers: HeaderMap) -> Dow
 
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
+
+    info!(
+        "Download started: file_id: {}, filename: {}, size: {} bytes",
+        id, metadata.filename, metadata.file_size
+    );
 
     Ok(Response::builder()
         .status(StatusCode::OK)

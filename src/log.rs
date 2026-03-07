@@ -61,7 +61,7 @@ macro_rules! trace {
     ($($arg:tt)*) => {
         {
             use colored::Colorize;
-            $crate::utils::log::log($crate::utils::log::Level::Trace, format!($($arg)*).dimmed())
+            $crate::log::log($crate::log::Level::Trace, format!($($arg)*).dimmed())
         }
     };
 }
@@ -71,7 +71,7 @@ macro_rules! debug {
     ($($arg:tt)*) => {
         {
             use colored::Colorize;
-            $crate::utils::log::log($crate::utils::log::Level::Debug, format!($($arg)*).blue())
+            $crate::log::log($crate::log::Level::Debug, format!($($arg)*).blue())
         }
     };
 }
@@ -81,7 +81,7 @@ macro_rules! info {
     ($($arg:tt)*) => {
         {
             use colored::Colorize;
-            $crate::utils::log::log($crate::utils::log::Level::Info, format!($($arg)*).green())
+            $crate::log::log($crate::log::Level::Info, format!($($arg)*).green())
         }
     };
 }
@@ -91,7 +91,7 @@ macro_rules! warn {
     ($($arg:tt)*) => {
         {
             use colored::Colorize;
-            $crate::utils::log::log($crate::utils::log::Level::Warn, format!($($arg)*).yellow())
+            $crate::log::log($crate::log::Level::Warn, format!($($arg)*).yellow())
         }
     };
 }
@@ -101,7 +101,7 @@ macro_rules! error {
     ($($arg:tt)*) => {
         {
             use colored::Colorize;
-            $crate::utils::log::log($crate::utils::log::Level::Error, format!($($arg)*).red())
+            $crate::log::log($crate::log::Level::Error, format!($($arg)*).red())
         }
     };
 }
