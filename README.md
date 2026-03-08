@@ -1,3 +1,5 @@
+Im in need of simple storage server, which can be use in CI pipeline and my other projects...
+
 My initial thoughts
 
 - The protocol will be very simple and secure, ok

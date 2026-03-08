@@ -10,27 +10,34 @@ use std::time::Instant;
 use std::{fs, io};
 use uuid::Uuid;
 
+const NETWORK_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+
 pub fn start_raw_tcp_server(port: u16) -> Result<()> {
     use std::net::TcpListener;
+    use std::thread;
 
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
-    info!("Raw TCP server listening on 0.0.0.0:{}", port);
+    listener.set_nonblocking(true)?;
+    info!(
+        "Raw TCP server listening on 0.0.0.0:{} (multi-threaded)",
+        port
+    );
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut socket) => {
-                info!("New connection from {:?}", socket.peer_addr());
-                if let Err(e) = handle_raw_connection(&mut socket) {
-                    error!("Error handling connection: {}", e);
-                }
+    loop {
+        match listener.accept() {
+            Ok((mut socket, addr)) => {
+                info!("New connection from {:?}", addr);
+                thread::spawn(move || {
+                    if let Err(e) = handle_raw_connection(&mut socket) {
+                        error!("Error handling connection: {}", e);
+                    }
+                });
             }
             Err(e) => {
                 error!("Connection failed: {}", e);
             }
         }
     }
-
-    Ok(())
 }
 
 fn handle_raw_connection(socket: &mut TcpStream) -> Result<()> {
@@ -152,7 +159,7 @@ fn handle_raw_upload(
     let mut file = fs::File::create(&file_path)?;
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
 
     while received < file_size {
         let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
@@ -241,7 +248,7 @@ fn handle_raw_download(socket: &mut TcpStream, headers: &HashMap<String, String>
 
     // Stream file
     let mut file = fs::File::open(&file_path)?;
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
@@ -420,7 +427,7 @@ pub async fn download_file_raw(
     let mut output_file = fs::File::create(&output).context("Failed to create output file")?;
 
     let mut received: u64 = 0;
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; 32 * 1024];
 
     while received < file_size {
         let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
