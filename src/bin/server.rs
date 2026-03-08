@@ -9,13 +9,14 @@ async fn main() -> Result<()> {
     let args = ServerArgs::parse();
 
     match args.command {
-        Some(ServerCommands::Serve { port, raw_tcp }) => {
-            if raw_tcp {
-                serve_raw_tcp(port).await?;
-            } else {
+        Some(ServerCommands::Serve { port, protocol }) => match protocol.as_str() {
+            "v1" => {
                 serve_http(port).await?;
             }
-        }
+            "v2" | _ => {
+                serve_raw_tcp(port).await?;
+            }
+        },
         None => {
             ascii_art();
         }

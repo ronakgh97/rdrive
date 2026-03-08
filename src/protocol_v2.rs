@@ -1,13 +1,13 @@
-use crate::{Metadata, error, get_storage_path_blocking, info};
+use crate::{Metadata, ON_GOINGS, error, get_storage_path_blocking, info, trace, warn};
 use anyhow::Context;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::fs;
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::time::Instant;
-use std::{fs, io};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const NETWORK_BUFFER_SIZE: usize = 4 * 1024 * 1024;
@@ -18,28 +18,39 @@ pub fn start_raw_tcp_server(port: u16) -> Result<()> {
 
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
     listener.set_nonblocking(true)?;
-    info!(
-        "Raw TCP server listening on 0.0.0.0:{} (multi-threaded)",
-        port
-    );
+    info!("Raw TCP server listening on 0.0.0.0:{}", port);
 
     loop {
         match listener.accept() {
             Ok((mut socket, addr)) => {
                 info!("New connection from {:?}", addr);
-                thread::spawn(move || {
-                    if let Err(e) = handle_raw_connection(&mut socket) {
-                        error!("Error handling connection: {}", e);
-                    }
+                socket.set_nonblocking(false)?;
+                thread::spawn(move || match handle_raw_connection(&mut socket) {
+                    Ok(_) => trace!(
+                        "{:?} spawned for connection from {:?}",
+                        thread::current().id(),
+                        addr
+                    ),
+                    Err(e) => error!("Error handling connection from {:?}: {}", addr, e),
                 });
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) if e.kind() == io::ErrorKind::ConnectionAborted => {
+                info!("Connection aborted: {}", e);
             }
             Err(e) => {
                 error!("Connection failed: {}", e);
+                break;
             }
         }
     }
+
+    Ok(())
 }
 
+#[inline]
 fn handle_raw_connection(socket: &mut TcpStream) -> Result<()> {
     let time_start = Instant::now();
 
@@ -155,6 +166,9 @@ fn handle_raw_upload(
         filename, file_size, file_id
     );
 
+    // Mark as ongoing upload
+    ON_GOINGS.insert(file_id.clone(), filename.clone());
+
     // Create file and read data
     let mut file = fs::File::create(&file_path)?;
     let mut hasher = Sha256::new();
@@ -172,10 +186,18 @@ fn handle_raw_upload(
         received += n as u64;
     }
 
-    file.flush()?;
+    // Ensure all data is written before validating
+    if !buf.is_empty() {
+        file.flush()?;
+    }
 
     if received != file_size {
         fs::remove_file(&file_path)?;
+        warn!(
+            "File size mismatch: expected {} bytes but received {} bytes",
+            file_size, received
+        );
+        ON_GOINGS.remove(&file_id);
         send_error(socket, 400, "File size mismatch")?;
         return Ok(());
     }
@@ -183,11 +205,15 @@ fn handle_raw_upload(
     let computed_hash = format!("{:x}", hasher.finalize());
     if computed_hash != *file_hash_expected {
         fs::remove_file(&file_path)?;
+        warn!(
+            "Hash mismatch: expected {} but computed {}",
+            file_hash_expected, computed_hash
+        );
+        ON_GOINGS.remove(&file_id);
         send_error(socket, 400, "Hash mismatch")?;
         return Ok(());
     }
 
-    // Save metadata
     let metadata = Metadata {
         filename: filename.clone(),
         file_size,
@@ -195,8 +221,11 @@ fn handle_raw_upload(
         file_key: file_key.clone(),
     };
 
+    // Save metadata on success
     let meta_path = storage_path.join(format!("{}.meta", sanitized_id));
     fs::write(&meta_path, serde_json::to_vec(&metadata)?)?;
+
+    ON_GOINGS.remove(&file_id);
 
     let time_took = time_start.elapsed().as_secs_f64();
     send_ok_upload(socket, &file_id, time_took)?;
@@ -228,11 +257,11 @@ fn handle_raw_download(socket: &mut TcpStream, headers: &HashMap<String, String>
     let file_path = storage_path.join(&sanitized_id);
 
     let meta_content = fs::read_to_string(&meta_path)?;
-    let metadata: serde_json::Value = serde_json::from_str(&meta_content)?;
+    let metadata: Metadata = serde_json::from_str(&meta_content)?;
 
-    let filename = metadata["filename"].as_str().unwrap_or("file");
-    let file_size = metadata["file_size"].as_u64().unwrap_or(0);
-    let file_hash = metadata["file_hash"].as_str().unwrap_or("");
+    let filename = metadata.filename;
+    let file_size = metadata.file_size;
+    let file_hash = metadata.file_hash;
 
     info!(
         "Downloading: {} ({} bytes) - file_id: {}",
@@ -255,6 +284,11 @@ fn handle_raw_download(socket: &mut TcpStream, headers: &HashMap<String, String>
             break;
         }
         socket.write_all(&buf[..n])?;
+    }
+
+    // Ensure all data is sent before shutting down write
+    if !buf.is_empty() {
+        socket.flush()?;
     }
 
     socket.shutdown(std::net::Shutdown::Write)?;
@@ -286,11 +320,13 @@ pub async fn upload_file_raw(file_path: PathBuf, port: u16) -> Result<String> {
         hasher.update(&buf[..n]);
     }
 
-    print!("Enter file key: ");
-    Write::flush(&mut io::stdout())?;
-    let mut file_key = String::new();
-    io::stdin().read_line(&mut file_key)?;
-    let file_key = file_key.trim().to_string();
+    let file_key: String = {
+        print!("Enter file key: ");
+        Write::flush(&mut io::stdout())?;
+        let mut file_key = String::new();
+        io::stdin().read_line(&mut file_key)?;
+        file_key.trim().to_string()
+    };
 
     let file_hash = format!("{:x}", hasher.finalize());
     println!("Computed hash: {}", file_hash);
@@ -299,9 +335,9 @@ pub async fn upload_file_raw(file_path: PathBuf, port: u16) -> Result<String> {
     let mut stream =
         TcpStream::connect(format!("localhost:{}", port)).context("Failed to connect to server")?;
 
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+
+    stream.set_nodelay(true).ok();
 
     // Send UPLOAD request
     let request = format!(
@@ -323,6 +359,11 @@ pub async fn upload_file_raw(file_path: PathBuf, port: u16) -> Result<String> {
         stream
             .write_all(&buf[..n])
             .context("Failed to send file data")?;
+    }
+
+    // Ensure all data is sent before reading response
+    if !buf.is_empty() {
+        stream.flush().context("Failed to flush file")?;
     }
 
     // Read response
@@ -372,9 +413,7 @@ pub async fn download_file_raw(
     let mut stream =
         TcpStream::connect(format!("localhost:{}", port)).context("Failed to connect to server")?;
 
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
 
     // Send DOWNLOAD request
     let request = format!("DOWNLOAD\nfile-id: {}\nfile-key: {}\n\n", file_id, file_key);

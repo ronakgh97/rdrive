@@ -1,6 +1,10 @@
 use colored::{ColoredString, Colorize};
 use std::env;
 
+lazy_static::lazy_static! {
+    static ref LOG_LEVEL: Level = Level::from_env();
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     Trace = 0,
@@ -26,10 +30,6 @@ impl Level {
             })
             .unwrap_or(Level::Info)
     }
-}
-
-lazy_static::lazy_static! {
-    static ref LOG_LEVEL: Level = Level::from_env();
 }
 
 #[inline]

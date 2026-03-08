@@ -21,9 +21,9 @@ pub enum ServerCommands {
         #[arg(short, long)]
         port: Option<u16>,
 
-        /// Use raw TCP socket server (no Axum)
-        #[arg(long)]
-        raw_tcp: bool,
+        /// Protocol version: v1 (HTTP) or v2 (Custom TCP)
+        #[arg(long, default_value = "v2")]
+        protocol: String,
     },
 }
 
@@ -51,9 +51,9 @@ pub enum ClientCommands {
         #[arg(short, long)]
         port: String,
 
-        /// Use raw TCP custom protocol
+        /// Protocol version: v1 (HTTP) or v2 (Custom TCP)
         #[arg(long)]
-        raw_tcp: bool,
+        protocol: Option<String>,
     },
 
     /// Download a file from the server
@@ -66,8 +66,8 @@ pub enum ClientCommands {
         #[arg(short, long)]
         port: String,
 
-        /// Use raw TCP custom protocol
+        /// Protocol version: v1 (HTTP) or v2 (Custom TCP)
         #[arg(long)]
-        raw_tcp: bool,
+        protocol: Option<String>,
     },
 }

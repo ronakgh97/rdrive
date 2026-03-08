@@ -1,5 +1,8 @@
+use dashmap::DashMap;
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 pub mod args;
 pub mod log;
@@ -29,4 +32,10 @@ pub struct Metadata {
     file_size: u64,
     file_hash: String,
     file_key: String,
+}
+
+static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
+
+lazy_static! {
+    pub static ref ON_GOINGS: DashMap<String, String> = DashMap::new();
 }
