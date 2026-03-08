@@ -20,6 +20,10 @@ pub enum ServerCommands {
         /// Optional port to run the server on
         #[arg(short, long)]
         port: Option<u16>,
+
+        /// Use raw TCP socket server (no Axum)
+        #[arg(long)]
+        raw_tcp: bool,
     },
 }
 
@@ -43,9 +47,13 @@ pub enum ClientCommands {
         #[arg(short, long)]
         file: PathBuf,
 
-        /// Default Port to connect to the server (default: http://localhost:3000)
+        /// Port to connect to the server (default: 3000)
         #[arg(short, long)]
         port: String,
+
+        /// Use raw TCP custom protocol
+        #[arg(long)]
+        raw_tcp: bool,
     },
 
     /// Download a file from the server
@@ -54,8 +62,12 @@ pub enum ClientCommands {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Default Port to connect to the server (default: http://localhost:3000)
+        /// Port to connect to the server (default: 3000)
         #[arg(short, long)]
         port: String,
+
+        /// Use raw TCP custom protocol
+        #[arg(long)]
+        raw_tcp: bool,
     },
 }

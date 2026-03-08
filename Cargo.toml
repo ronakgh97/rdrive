@@ -21,7 +21,6 @@ tokio-util = { version = "0.7.18", features = ["io"] }
 clap = { version = "4.5.60", features = ["derive"] }
 axum = "0.8.8"
 reqwest = { version = "0.13.2", features = ["stream", "json"] }
-# multer = "3.1.0"
 futures-util = "0.3.32"
 anyhow = "1.0.102"
 chrono = "0.4.44"
@@ -34,3 +33,5 @@ dashmap = "6.1.0"
 sha2 = "0.10.9"
 lazy_static = "1.5.0"
 uuid = { version = "1.22.0", features = ["v4"] }
+# multer = "3.1.0"
+# postcard = "1.1.3"

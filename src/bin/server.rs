@@ -1,15 +1,20 @@
 use anyhow::Result;
 use clap::Parser;
+use colored::Colorize;
 use r_storage::args::{ServerArgs, ServerCommands};
-use r_storage::service::serve;
+use r_storage::service::{serve_http, serve_raw_tcp};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = ServerArgs::parse();
 
     match args.command {
-        Some(ServerCommands::Serve { port }) => {
-            serve(port).await?;
+        Some(ServerCommands::Serve { port, raw_tcp }) => {
+            if raw_tcp {
+                serve_raw_tcp(port).await?;
+            } else {
+                serve_http(port).await?;
+            }
         }
         None => {
             ascii_art();
@@ -30,4 +35,9 @@ fn ascii_art() {
     ";
 
     println!("{}", ascii);
+
+    println!(
+        "🔗 Github: {}",
+        "https://github.com/ronakgh97/rstorage".magenta().bold()
+    );
 }
