@@ -15,7 +15,23 @@ My initial thoughts
   of file-Id, In the future, I am thinking having file-Id in this format: {6x}-{6x}-{6x}-{6x}, now with PCM, there will
   6 hexadecimal characters, each section with 16^6 combinations, and total of 4 section so 16^24 combinations, so no
   collisions...I hope
-- Concurrency, well Axum will handle that, and I will Dashmap to keep track of the all ops with minimal locking, and
+- Concurrency, well Thread spawning/Pool will handle that, and I will Dashmap to keep track of the all ops with minimal
+  locking, and
   also I will use Tokio for async file ops, so it should be good
 - File storage? Of course...Local storage or docker volumes (later)
 - Security....*sighhh*..encryption keys I guess...
+
+---
+
+TODO
+
+- Encryption keys for storage and metadata
+- Bandwidth tracking and limits
+- Better Error handling and logging
+- Thread pool for better concurrency and resource management
+- Better file management and cleanup strategies
+- Authentication and access control
+- Docker support
+- Uhm...what else?
+- Fix and improve the buffering and streaming for large files
+- More protocol features like file listing, metadata retrieval, more commands etc.
