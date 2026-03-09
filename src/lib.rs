@@ -34,7 +34,19 @@ pub struct Metadata {
     file_key: String,
 }
 
-static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
+pub static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
+
+#[inline]
+/// Get the server uptime in hours
+pub fn try_get_uptime_hrs() -> f64 {
+    if let Some(start_time) = START_TIME.get() {
+        let now = chrono::Local::now();
+        let duration = now.signed_duration_since(*start_time);
+        duration.num_hours() as f64
+    } else {
+        0.0
+    }
+}
 
 lazy_static! {
     pub static ref ON_GOINGS: DashMap<String, String> = DashMap::new();

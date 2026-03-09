@@ -1,431 +1,526 @@
-use crate::{Metadata, get_storage_path, info, warn};
+use crate::{Metadata, ON_GOINGS, error, get_storage_path_blocking, info, trace, warn};
 use anyhow::{Context, Result};
-use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Request};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
-use dashmap::DashMap;
-use futures_util::StreamExt;
-use lazy_static::lazy_static;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io;
-use std::io::Write;
+use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::time::Instant;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::io::ReaderStream;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
+const NETWORK_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
-lazy_static! {
-    pub static ref ON_GOINGS: DashMap<String, String> = DashMap::new();
+pub fn start_tcp_server(port: u16) -> Result<()> {
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
+    listener.set_nonblocking(true)?;
+
+    let storage_path = get_storage_path_blocking()?;
+
+    info!("TCP server (v1 protocol) listening on 0.0.{}", port);
+
+    let storage_path = Arc::new(storage_path);
+
+    loop {
+        match listener.accept() {
+            Ok((stream, addr)) => {
+                info!("Connection request from {:?}", addr);
+                let storage_path = Arc::clone(&storage_path);
+                thread::spawn(move || {
+                    trace!(
+                        "{:?} spawned for connection from {:?}",
+                        thread::current().id(),
+                        addr
+                    );
+                    if let Err(e) = handle_connection(&stream, &storage_path) {
+                        error!("Error handling connection from {:?}: {}", addr, e);
+                    }
+                });
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                warn!("Server connection refused");
+            }
+
+            Err(e) if e.kind() == io::ErrorKind::ConnectionAborted => {
+                warn!("Server connection aborted");
+            }
+            Err(e) => {
+                error!("Accept error: {}", e);
+            }
+        }
+    }
 }
 
-async fn create_router() -> Router {
-    Router::new()
-        .route("/status", get(status_handler))
-        .route("/upload", post(upload_handler))
-        .route("/download/{*id}", get(download_handler))
-        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024)) // Set max body size to 1GB
-}
+fn handle_connection(stream: &TcpStream, storage_path: &PathBuf) -> Result<()> {
+    let mut reader = BufReader::with_capacity(NETWORK_BUFFER_SIZE, stream.try_clone()?);
+    let mut writer = BufWriter::with_capacity(NETWORK_BUFFER_SIZE, stream.try_clone()?);
 
-pub async fn start_http_server(port: u16) -> Result<()> {
-    let router = create_router().await;
+    stream.set_nonblocking(false)?;
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(Duration::from_millis(10)))?;
 
-    let now = chrono::Local::now();
-    START_TIME.get_or_init(|| now);
-    let addr = format!("0.0.0.0:{}", port);
+    let (command, headers) = read_request(&mut reader)?;
+    info!("Received {} request", command);
 
-    info!("Server listening on {}", addr);
+    match command.as_str() {
+        "UPLOAD" => {
+            handle_upload(&mut reader, &mut writer, &headers, storage_path)?;
+        }
+        "DOWNLOAD" => {
+            handle_download(&mut reader, &mut writer, &headers, storage_path)?;
+        }
+        _ => {
+            send_error(&mut writer, 400, "Unknown command")?;
+        }
+    }
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router).await?;
+    writer.flush()?;
     Ok(())
 }
 
 #[inline]
-/// Get the server uptime in hours
-pub fn get_uptime_hrs() -> f64 {
-    if let Some(start_time) = START_TIME.get() {
-        let now = chrono::Local::now();
-        let duration = now.signed_duration_since(*start_time);
-        duration.num_hours() as f64
-    } else {
-        0.0
-    }
-}
+fn read_request(reader: &mut BufReader<TcpStream>) -> Result<(String, HashMap<String, String>)> {
+    let len = read_frame_length(reader)? as usize;
+    let mut header_bytes = vec![0u8; len];
+    reader.read_exact(&mut header_bytes)?;
 
-#[derive(Deserialize, Serialize)]
-struct Status {
-    timestamp: String,
-    uptime_hrs: f64,
-    on_goings_task: Vec<String>,
-}
+    let header_str = String::from_utf8(header_bytes).context("Invalid UTF-8 in request")?;
 
-pub async fn status_handler() -> impl IntoResponse {
-    let status = Status {
-        timestamp: chrono::Local::now().to_rfc3339(),
-        uptime_hrs: get_uptime_hrs(),
-        on_goings_task: ON_GOINGS.iter().map(|entry| entry.key().clone()).collect(),
-    };
+    let mut lines = header_str.lines();
+    let command = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Missing command"))?
+        .trim()
+        .to_string();
 
-    (StatusCode::OK, Json(status))
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct UploadStatus {
-    pub file_id: String,
-    pub time_took: f64,
-}
-
-const CHUNK_BUF_SIZE: usize = 8 * 1024 * 1024; // 8MB
-
-const WRITE_BUF_SIZE: usize = 16 * 1024 * 1024; // 16MB
-
-pub async fn upload_handler(request: Request<Body>) -> impl IntoResponse {
-    let headers: HeaderMap = request.headers().clone();
-
-    let time_start = Instant::now();
-
-    let filename = headers
-        .get("x-file-name")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::BAD_REQUEST)
-        .unwrap();
-
-    // TODO: Implement size-limit later (=<1gb for now)
-    // Size in bytes
-    let file_size = headers
-        .get("x-file-size")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::BAD_REQUEST)
-        .unwrap()
-        .parse::<u64>()
-        .unwrap();
-
-    let file_hash = headers
-        .get("x-file-hash")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::BAD_REQUEST)
-        .unwrap();
-
-    // TODO: Implement file key validation and authentication later
-    let file_key = headers
-        .get("x-file-key")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::BAD_REQUEST)
-        .unwrap();
-
-    let file_id = Uuid::new_v4().to_string();
-
-    // Register the ongoing upload task
-    ON_GOINGS.insert(file_id.clone(), file_hash.to_string());
-
-    info!(
-        "Upload request: filename: {}, size: {} bytes",
-        filename, file_size,
-    );
-
-    let mut stream = request.into_body().into_data_stream();
-
-    let sanitized_filename = file_id
-        .clone()
-        .replace("-", "_")
-        .replace("/", "_")
-        .replace(".", "_")
-        .replace("\\", "_");
-
-    let path = get_storage_path().await.unwrap().join(&sanitized_filename);
-
-    let file = tokio::fs::File::create(&path).await.unwrap();
-
-    let mut file = tokio::io::BufWriter::with_capacity(WRITE_BUF_SIZE, file);
-
-    // Buffer to hold incoming data until we have enough to write in chunks
-    // TODO: Change this buffer to adjust to file-size later
-    let mut buffer = Vec::with_capacity(CHUNK_BUF_SIZE);
-
-    let mut hasher = Sha256::new();
-    let mut received_bytes: u64 = 0;
-
-    while let Some(chunk) = stream.next().await {
-        let data = chunk.unwrap();
-
-        received_bytes += data.len() as u64;
-        hasher.update(&data);
-
-        buffer.extend_from_slice(&data);
-
-        while buffer.len() >= CHUNK_BUF_SIZE {
-            file.write_all(&buffer[..CHUNK_BUF_SIZE]).await.unwrap(); // No-copy write
-            buffer.drain(..CHUNK_BUF_SIZE);
+    let mut headers = HashMap::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some(colon_pos) = line.find(':') {
+            let key = line[..colon_pos].trim().to_string();
+            let value = line[colon_pos + 1..].trim().to_string();
+            headers.insert(key, value);
         }
     }
 
-    // Flush remaining buffer if it's the last chunk or whatever is left
-    if !buffer.is_empty() {
-        file.write_all(&buffer).await.unwrap();
-        // buffer.clear();
-    }
-
-    file.flush().await.unwrap();
-
-    // Post-Check
-    let computed_hash = format!("{:x}", hasher.finalize());
-
-    if computed_hash != file_hash {
-        warn!(
-            "Hash mismatch for file_id={}: expected {}, got {}",
-            file_id,
-            file_hash,
-            computed_hash.bold()
-        );
-
-        ON_GOINGS.remove(&file_id);
-        // Clean up the uploaded file if hash verification fails
-        tokio::fs::remove_file(&path).await.unwrap();
-        return (
-            StatusCode::NOT_ACCEPTABLE,
-            "Hash mismatch".to_string().into_response(),
-        );
-    }
-
-    if received_bytes != file_size {
-        warn!(
-            "Size mismatch for file_id={}: expected {} bytes, got {} bytes",
-            file_id, file_size, received_bytes
-        );
-
-        ON_GOINGS.remove(&file_id);
-        // Clean up the uploaded file if size verification fails
-        tokio::fs::remove_file(&path).await.unwrap();
-        return (
-            StatusCode::PARTIAL_CONTENT,
-            "Size mismatch for file_id={}: expected {} bytes, got {} bytes"
-                .to_string()
-                .into_response(),
-        );
-    }
-
-    info!(
-        "Upload completed: file_id: {}, time_took: {} seconds",
-        file_id,
-        time_start.elapsed().as_secs_f64()
-    );
-
-    // Save Hash and key
-    let metadata = Metadata {
-        filename: filename.to_string(),
-        file_size,
-        file_hash: file_hash.to_string(),
-        file_key: file_key.to_string(),
-    };
-
-    let path = get_storage_path()
-        .await
-        .unwrap()
-        .join(format!("{}.meta", &sanitized_filename));
-
-    let metadata_bytes = serde_json::to_vec(&metadata).unwrap();
-
-    tokio::fs::write(&path, metadata_bytes).await.unwrap();
-
-    let time_took = time_start.elapsed().as_secs_f64();
-
-    // Remove the ongoing task from the map after completion
-    ON_GOINGS.remove(&file_id);
-
-    (
-        StatusCode::OK,
-        Json(UploadStatus { file_id, time_took }).into_response(),
-    )
+    Ok((command, headers))
 }
 
-type DownloadResult = Result<Response<Body>, (StatusCode, String)>;
+/// Reads a 4-byte big-endian length prefix and returns the length as u32.
+#[inline]
+pub fn read_frame_length(reader: &mut BufReader<TcpStream>) -> Result<u32> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf);
+    Ok(len)
+}
 
-pub async fn download_handler(Path(id): Path<String>, headers: HeaderMap) -> DownloadResult {
-    // TODO: Implement file key validation and authentication later
-    let file_key = headers
-        .get("x-file-key")
-        .and_then(|v| v.to_str().ok())
-        .ok_or((StatusCode::BAD_REQUEST, "Missing file key".to_string()))?;
+#[inline]
+pub fn write_frame(writer: &mut BufWriter<TcpStream>, data: &[u8]) -> Result<()> {
+    let len = (data.len() as u32).to_be_bytes();
+    writer.write_all(&len)?;
+    writer.write_all(data)?;
+    Ok(())
+}
 
-    info!(
-        "Download request: file_id: {}, file_key: {}",
-        id,
-        file_key.dimmed()
+#[inline]
+fn send_error(writer: &mut BufWriter<TcpStream>, code: u16, message: &str) -> Result<()> {
+    let response = format!("ERROR\ncode: {}\nmessage: {}", code, message);
+    write_frame(writer, response.as_bytes())?;
+    Ok(())
+}
+
+fn send_ok_upload(
+    writer: &mut BufWriter<TcpStream>,
+    file_id: &str,
+    file_key: &str,
+    time_took: f64,
+) -> Result<()> {
+    let response = format!(
+        "OK\nfile-id: {}\nfile-key: {}\ntime-took: {}",
+        file_id, file_key, time_took
     );
+    write_frame(writer, response.as_bytes())?;
+    Ok(())
+}
 
-    let sanitized_id = id
+fn handle_upload(
+    reader: &mut BufReader<TcpStream>,
+    writer: &mut BufWriter<TcpStream>,
+    headers: &HashMap<String, String>,
+    storage_path: &PathBuf,
+) -> Result<()> {
+    let time_start = Instant::now();
+
+    let filename = headers
+        .get("file-name")
+        .ok_or_else(|| anyhow::anyhow!("Missing file-name header"))?
+        .clone();
+    let file_size: u64 = headers
+        .get("file-size")
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid file-size header"))?;
+    let file_hash_expected = headers
+        .get("file-hash")
+        .ok_or_else(|| anyhow::anyhow!("Missing file-hash header"))?
+        .clone();
+    let file_key = headers
+        .get("file-key")
+        .ok_or_else(|| anyhow::anyhow!("Missing file-key header"))?
+        .clone();
+
+    let file_id = Uuid::new_v4().to_string();
+    let sanitized_id = file_id
         .replace("-", "_")
         .replace("/", "_")
         .replace(".", "_")
         .replace("\\", "_");
 
-    let storage_path = get_storage_path().await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Server says sorry >.<".to_string(),
-        )
-    })?;
-
-    let meta_path = storage_path.join(format!("{}.meta", &sanitized_id));
     let file_path = storage_path.join(&sanitized_id);
 
-    let metadata_content = tokio::fs::read_to_string(&meta_path)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "File not found".to_string()))?;
-
-    let metadata: Metadata = serde_json::from_str(&metadata_content).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to parse metadata".to_string(),
-        )
-    })?;
-
-    let file = tokio::fs::File::open(&file_path)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "File not found".to_string()))?;
-
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
-
     info!(
-        "Download started: file_id: {}, filename: {}, size: {} bytes",
-        id, metadata.filename, metadata.file_size
+        "Uploading: {} ({} bytes) - file_id: {}",
+        filename, file_size, file_id
     );
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/octet-stream")
-        .header("x-file-name", metadata.filename)
-        .header("x-file-size", metadata.file_size)
-        .header("x-file-hash", metadata.file_hash)
-        .body(body)
-        .unwrap())
+    ON_GOINGS.insert(file_id.clone(), filename.clone());
+
+    let mut file = File::create(&file_path)?;
+    let mut hasher = Sha256::new();
+    let mut received: u64 = 0;
+    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE * 2];
+
+    while received < file_size {
+        let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
+        let n = reader.read(&mut buf[..to_read])?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        file.write_all(&buf[..n])?;
+        received += n as u64;
+    }
+
+    file.flush()?;
+
+    if received != file_size {
+        fs::remove_file(&file_path)?;
+        ON_GOINGS.remove(&file_id);
+        send_error(writer, 406, "File size mismatch")?;
+        return Ok(());
+    }
+
+    let computed_hash = format!("{:x}", hasher.finalize());
+    if computed_hash != file_hash_expected {
+        fs::remove_file(&file_path)?;
+        warn!(
+            "Hash mismatch: expected {} but computed {}",
+            file_hash_expected, computed_hash
+        );
+        ON_GOINGS.remove(&file_id);
+        send_error(writer, 406, "Hash mismatch")?;
+        return Ok(());
+    }
+
+    let metadata = Metadata {
+        filename: filename.clone(),
+        file_size,
+        file_hash: computed_hash.clone(),
+        file_key: file_key.clone(),
+    };
+
+    // Save metadata
+    let meta_path = storage_path.join(format!("{}.meta", sanitized_id));
+    fs::write(&meta_path, serde_json::to_vec(&metadata)?)?;
+
+    ON_GOINGS.remove(&file_id);
+
+    let time_took = time_start.elapsed().as_secs_f64();
+    send_ok_upload(writer, &file_id, &file_key, time_took)?;
+
+    info!(
+        "Upload complete: file-id: {} - file-hash: {}",
+        file_id, computed_hash
+    );
+    Ok(())
 }
 
-pub async fn upload_file_client(file_path: PathBuf, port: u16) -> Result<String> {
-    let filename = file_path
+fn handle_download(
+    _reader: &mut BufReader<TcpStream>,
+    writer: &mut BufWriter<TcpStream>,
+    headers: &HashMap<String, String>,
+    storage_path: &PathBuf,
+) -> Result<()> {
+    let file_id = headers
+        .get("file-id")
+        .ok_or_else(|| anyhow::anyhow!("Missing file-id header"))?
+        .clone();
+    let _file_key = headers
+        .get("file-key")
+        .ok_or_else(|| anyhow::anyhow!("Missing file-key header"))?
+        .clone();
+
+    let sanitized_id = file_id
+        .replace("-", "_")
+        .replace("/", "_")
+        .replace(".", "_")
+        .replace("\\", "_");
+
+    let meta_path = storage_path.join(format!("{}.meta", sanitized_id));
+    let file_path = storage_path.join(&sanitized_id);
+
+    if !meta_path.exists() {
+        send_error(writer, 404, "File not found")?;
+        return Ok(());
+    }
+
+    let meta_content = fs::read_to_string(&meta_path)?;
+    let metadata: Metadata = serde_json::from_str(&meta_content)?;
+
+    let filename = metadata.filename;
+    let file_size = metadata.file_size;
+    let file_hash = metadata.file_hash;
+
+    info!(
+        "Downloading: {} ({} bytes) - file_id: {}",
+        filename, file_size, file_id
+    );
+
+    let header = format!(
+        "OK\nfile-name: {}\nfile-size: {}\nfile-hash: {}\n",
+        filename, file_size, file_hash
+    );
+    write_frame(writer, header.as_bytes())?;
+
+    let mut file = File::open(&file_path)?;
+    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE * 2];
+
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&buf[..n])?;
+    }
+
+    writer.flush()?;
+
+    info!("Download complete: {}", file_id);
+    Ok(())
+}
+
+pub async fn upload_file_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let filename = path
         .file_name()
         .context("Invalid file path")?
         .to_string_lossy()
         .to_string();
 
-    let metadata = tokio::fs::metadata(&file_path)
-        .await
-        .context("Failed to read file metadata")?;
+    let metadata = fs::metadata(&path).context("Failed to read file metadata")?;
     let file_size = metadata.len();
 
-    let file = tokio::fs::File::open(&file_path)
-        .await
-        .context("Failed to open file")?;
-    let mut reader = tokio::io::BufReader::new(file);
+    let mut file = File::open(&path).context("Failed to open file")?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 32 * 1024];
 
     loop {
-        let n = reader.read(&mut buf).await.context("Failed to read file")?;
+        let n = file.read(&mut buf).context("Failed to read file")?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
     }
 
-    print!("Enter file key: ");
-    Write::flush(&mut io::stdout())?;
-    let mut file_key = String::new();
-    io::stdin().read_line(&mut file_key)?;
-    let file_key = file_key.trim().to_string();
-
     let file_hash = format!("{:x}", hasher.finalize());
-    println!("Computed hash: {}", file_hash);
 
-    let client = Client::new();
-    let url = format!("http://localhost:{}/upload", port);
+    let file_key: String = {
+        print!("Enter file key: ");
+        Write::flush(&mut io::stdout())?;
+        let mut file_key = String::new();
+        io::stdin().read_line(&mut file_key)?;
+        file_key.trim().to_string()
+    };
 
-    let file = tokio::fs::File::open(&file_path)
-        .await
-        .context("Failed to reopen file")?;
+    println!("Starting TCP upload: {} ({} bytes)", filename, file_size);
 
-    let reader = tokio::io::BufReader::with_capacity(4 * 1024 * 1024, file);
-    let stream = ReaderStream::new(reader);
-    let body = reqwest::Body::wrap_stream(stream);
+    let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    stream.set_nodelay(true)?;
 
-    let request = client
-        .post(&url)
-        .header("x-file-name", &filename)
-        .header("x-file-size", file_size.to_string())
-        .header("x-file-key", &file_key)
-        .header("x-file-hash", &file_hash)
-        .body(body);
+    let request = format!(
+        "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n",
+        filename, file_size, file_hash, file_key
+    );
 
-    let response = request.send().await.context("Failed to send request")?;
+    let len = (request.len() as u32).to_be_bytes();
+    stream.write_all(&len).await?;
+    stream.write_all(request.as_bytes()).await?;
 
-    if !response.status().is_success() {
-        anyhow::bail!("Upload failed with status: {}", response.status());
+    let mut file = File::open(path).context("Failed to reopen file")?;
+    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
+
+    loop {
+        let n = file.read(&mut buf).context("Failed to read file")?;
+        if n == 0 {
+            break;
+        }
+        stream
+            .write_all(&buf[..n])
+            .await
+            .context("Failed to send file data")?;
     }
 
-    let upload_response: UploadStatus =
-        response.json().await.context("Failed to parse response")?;
+    stream.flush().await.context("Failed to flush")?;
 
-    println!("Upload successful! File ID: {}", upload_response.file_id);
-    Ok(upload_response.file_id)
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .context("Failed to read response length")?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut response = vec![0u8; len];
+    stream
+        .read_exact(&mut response)
+        .await
+        .context("Failed to read response")?;
+
+    let response = String::from_utf8_lossy(&response);
+
+    if !response.starts_with("OK\n") {
+        anyhow::bail!("Upload failed: {}", response);
+    }
+
+    let mut file_id = String::new();
+    let mut time_took = String::new();
+
+    for line in response.lines() {
+        if let Some(id) = line.strip_prefix("file-id: ") {
+            file_id = id.trim().to_string();
+        }
+        if let Some(_key) = line.strip_prefix("file-key: ") {}
+        if let Some(time) = line.strip_prefix("time-took: ") {
+            time_took = time.trim().to_string();
+        }
+    }
+
+    println!(
+        "Upload complete! File ID: {}, Time took: {}",
+        file_id, time_took
+    );
+
+    Ok(())
 }
 
 pub async fn download_file_client(
     file_id: String,
     file_key: String,
-    output_path: Option<PathBuf>,
+    output: Option<PathBuf>,
+    host: &str,
     port: u16,
 ) -> Result<PathBuf> {
-    let client = Client::new();
-    let url = format!("http://localhost:{}/download/{}", port, file_id);
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
-    let response = client
-        .get(&url)
-        .header("x-file-key", &file_key)
-        .send()
+    let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    stream.set_nodelay(true)?;
+
+    let request = format!("DOWNLOAD\nfile-id: {}\nfile-key: {}\n", file_id, file_key);
+
+    let len = (request.len() as u32).to_be_bytes();
+    stream.write_all(&len).await?;
+    stream.write_all(request.as_bytes()).await?;
+
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
         .await
-        .context("Failed to send request")?;
+        .context("Failed to read header length")?;
+    let len = u32::from_be_bytes(len_buf) as usize;
 
-    if !response.status().is_success() {
-        anyhow::bail!("Download failed with status: {}", response.status());
+    let mut header_bytes = vec![0u8; len];
+    stream
+        .read_exact(&mut header_bytes)
+        .await
+        .context("Failed to read header")?;
+
+    let header = String::from_utf8_lossy(&header_bytes);
+
+    if header.starts_with("ERROR") {
+        anyhow::bail!("Download failed: {}", header);
     }
 
-    let filename = response
-        .headers()
-        .get("x-file-name")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| file_id.clone());
+    let mut filename = file_id.clone();
+    let mut file_size: u64 = 0;
+    let mut file_hash = String::new();
 
-    let output = output_path
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(&filename);
+    for line in header.lines() {
+        if let Some(name) = line.strip_prefix("file-name: ") {
+            filename = name.trim().to_string();
+        }
+        if let Some(size) = line.strip_prefix("file-size: ") {
+            file_size = size.trim().parse().unwrap_or(0);
+        }
+        if let Some(hash) = line.strip_prefix("file-hash: ") {
+            file_hash = hash.trim().to_string();
+        }
+    }
 
-    let mut file = tokio::fs::File::create(&output)
-        .await
-        .context("Failed to create output file")?;
-    let mut stream = response.bytes_stream();
+    println!("Downloading: {} ({} bytes)", filename, file_size);
 
-    while let Some(chunk) = stream.next().await {
-        let data = chunk.context("Failed to read response chunk")?;
-        AsyncWriteExt::write_all(&mut file, &data)
+    let output_path = output.unwrap_or_else(|| PathBuf::from(".")).join(&filename);
+
+    let mut output_file = File::create(&output_path)?;
+    let mut received: u64 = 0;
+    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
+
+    while received < file_size {
+        let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
+        let n = stream
+            .read(&mut buf[..to_read])
             .await
-            .context("Failed to write to file")?;
+            .context("Failed to read file data")?;
+        if n == 0 {
+            break;
+        }
+        output_file.write_all(&buf[..n])?;
+        received += n as u64;
     }
 
-    AsyncWriteExt::flush(&mut file)
-        .await
-        .context("Failed to flush file")?;
+    output_file.flush()?;
 
-    println!("Download successful! Saved to: {}", output.display());
-    Ok(output)
+    let mut file = File::open(&output_path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+
+    let computed_hash = format!("{:x}", hasher.finalize());
+    if computed_hash != file_hash {
+        fs::remove_file(&output_path).ok();
+        anyhow::bail!(
+            "Hash mismatch: expected {} but computed {}",
+            file_hash,
+            computed_hash
+        );
+    }
+
+    println!("Download complete! Saved to: {}", output_path.display());
+    Ok(output_path)
 }
