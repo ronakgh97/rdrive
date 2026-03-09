@@ -11,7 +11,7 @@ pub const GARBAGE_SIZE: u32 = 256 * 1024 * 1024;
 #[inline]
 fn get_random_bytes(size: u32) -> Vec<u8> {
     let mut rng = rand::rng();
-    (0..size).map(|_| rng.random()).collect()
+    (0..size).map(|_| rng.random::<u8>()).collect()
 }
 
 // --- protocol_v2 ----
@@ -137,7 +137,7 @@ fn test_concurrency() {
     let port = free_port();
     start_server(port);
 
-    let num_clients = 6;
+    let num_clients = 12;
     let mut handles = Vec::new();
 
     for i in 0..num_clients {
@@ -289,7 +289,7 @@ fn test_concurrency_v1() {
     let port = free_port();
     start_server_v1(port);
 
-    let num_clients = 6;
+    let num_clients = 12;
     let mut handles = Vec::new();
 
     for i in 0..num_clients {

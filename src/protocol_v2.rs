@@ -1,12 +1,12 @@
 use crate::{
-    Metadata, ON_GOINGS, START_TIME, error, get_storage_path_blocking, info, trace,
+    Metadata, ON_GOINGS, START_TIME, debug, error, get_storage_path_blocking, info, trace,
     try_get_uptime_hrs, warn,
 };
 use anyhow::Context;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -22,7 +22,7 @@ pub fn start_tcp_server(port: u16) -> Result<()> {
 
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
     listener.set_nonblocking(true)?;
-    info!("Raw TCP server listening on 0.0.0.0:{}", port);
+    info!("Server listening on 0.0.0.0:{}", port);
 
     loop {
         match listener.accept() {
@@ -41,8 +41,11 @@ pub fn start_tcp_server(port: u16) -> Result<()> {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
             }
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                warn!("Server connection refused");
+            }
             Err(e) if e.kind() == io::ErrorKind::ConnectionAborted => {
-                info!("Connection aborted: {}", e);
+                warn!("Server connection aborted");
             }
             Err(e) => {
                 error!("Connection failed: {}", e);
@@ -58,6 +61,9 @@ pub fn start_tcp_server(port: u16) -> Result<()> {
 fn handle_raw_connection(socket: &mut TcpStream) -> Result<()> {
     let time_start = Instant::now();
 
+    socket.set_nodelay(true)?;
+    socket.set_read_timeout(Some(Duration::from_secs(10)))?;
+
     // Read command line
     let mut command_line = String::new();
     loop {
@@ -72,7 +78,7 @@ fn handle_raw_connection(socket: &mut TcpStream) -> Result<()> {
         command_line.push(buf[0] as char);
     }
     let command = command_line.trim().to_string();
-    info!("Command: {}", command);
+    debug!("Received {} request", command);
 
     // Read headers until empty line
     let mut headers = HashMap::new();
@@ -103,10 +109,10 @@ fn handle_raw_connection(socket: &mut TcpStream) -> Result<()> {
 
     match command.as_str() {
         "UPLOAD" => {
-            handle_raw_upload(socket, &headers, time_start)?;
+            handle_server_upload(socket, &headers, time_start)?;
         }
         "DOWNLOAD" => {
-            handle_raw_download(socket, &headers)?;
+            handle_server_download(socket, &headers)?;
         }
         "STATUS" => {
             let ongoing = ON_GOINGS.len();
@@ -159,15 +165,11 @@ fn send_generic_message(socket: &mut TcpStream, message: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle_raw_upload(
+fn handle_server_upload(
     socket: &mut TcpStream,
     headers: &HashMap<String, String>,
     time_start: Instant,
 ) -> Result<()> {
-    use sha2::{Digest, Sha256};
-    use std::fs;
-    use std::io::{Read, Write};
-
     let filename = headers
         .get("file-name")
         .ok_or_else(|| anyhow::anyhow!("Missing file-name header"))?;
@@ -193,15 +195,18 @@ fn handle_raw_upload(
     let file_path = storage_path.join(&sanitized_id);
 
     info!(
-        "Uploading: {} ({} bytes) - file_id: {}",
-        filename, file_size, file_id
+        "Start Uploading: {} ({} bytes) - Hash: {}",
+        filename,
+        file_size,
+        file_hash_expected.dimmed()
     );
 
     // Mark as ongoing upload
     ON_GOINGS.insert(file_id.clone(), filename.clone());
 
     // Create file and read data
-    let mut file = fs::File::create(&file_path)?;
+    let raw_file = fs::File::create(&file_path)?;
+    let mut file = BufWriter::with_capacity(NETWORK_BUFFER_SIZE, raw_file);
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
     let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
@@ -217,10 +222,7 @@ fn handle_raw_upload(
         received += n as u64;
     }
 
-    // Ensure all data is written before validating
-    if !buf.is_empty() {
-        file.flush()?;
-    }
+    file.flush()?;
 
     if received != file_size {
         fs::remove_file(&file_path)?;
@@ -269,10 +271,24 @@ fn handle_raw_upload(
     Ok(())
 }
 
-fn handle_raw_download(socket: &mut TcpStream, headers: &HashMap<String, String>) -> Result<()> {
+fn handle_server_download(socket: &mut TcpStream, headers: &HashMap<String, String>) -> Result<()> {
     let file_id = headers
         .get("file-id")
         .ok_or_else(|| anyhow::anyhow!("Missing file-id header"))?;
+
+    if ON_GOINGS.contains_key(file_id) {
+        warn!(
+            "File {} is currently being uploaded, cannot download",
+            file_id
+        );
+        send_error(
+            socket,
+            409,
+            "File is currently being uploaded, try again later",
+        )?;
+        return Ok(());
+    }
+
     let _file_key = headers
         .get("file-key")
         .ok_or_else(|| anyhow::anyhow!("Missing file-key header"))?;
@@ -309,18 +325,17 @@ fn handle_raw_download(socket: &mut TcpStream, headers: &HashMap<String, String>
     // Stream file
     let mut file = fs::File::open(&file_path)?;
     let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
+    let mut writer = BufWriter::with_capacity(NETWORK_BUFFER_SIZE, socket.try_clone()?);
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        socket.write_all(&buf[..n])?;
+        writer.write_all(&buf[..n])?;
     }
 
-    // Ensure all data is sent before shutting down write
-    if !buf.is_empty() {
-        socket.flush()?;
-    }
+    writer.flush()?;
+    drop(writer);
 
     socket.shutdown(std::net::Shutdown::Write)?;
 
@@ -328,7 +343,7 @@ fn handle_raw_download(socket: &mut TcpStream, headers: &HashMap<String, String>
     Ok(())
 }
 
-pub async fn upload_file_tcp(file_path: PathBuf, port: u16) -> Result<String> {
+pub async fn upload_client(file_path: PathBuf, host: &str, port: u16) -> Result<String> {
     let filename = file_path
         .file_name()
         .context("Invalid file path")?
@@ -362,9 +377,16 @@ pub async fn upload_file_tcp(file_path: PathBuf, port: u16) -> Result<String> {
     let file_hash = format!("{:x}", hasher.finalize());
     println!("Computed hash: {}", file_hash);
 
+    let progressbar = indicatif::ProgressBar::new(file_size);
+    progressbar.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
+            .progress_chars("&>-"),
+    );
+
     // Connect to server
     let mut stream =
-        TcpStream::connect(format!("localhost:{}", port)).context("Failed to connect to server")?;
+        TcpStream::connect(format!("{}:{}", host, port)).context("Failed to connect to server")?;
 
     stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
     stream.set_nodelay(true).ok();
@@ -391,12 +413,12 @@ pub async fn upload_file_tcp(file_path: PathBuf, port: u16) -> Result<String> {
         stream
             .write_all(&buf[..n])
             .context("Failed to send file data")?;
+        progressbar.inc(n as u64);
     }
 
-    // Ensure all data is sent before reading response
-    if !buf.is_empty() {
-        stream.flush().context("Failed to flush file")?;
-    }
+    stream.flush().context("Failed to flush file")?;
+
+    progressbar.finish_and_clear();
 
     // Read response
     let mut response = String::new();
@@ -435,7 +457,7 @@ pub async fn upload_file_tcp(file_path: PathBuf, port: u16) -> Result<String> {
     Ok(file_id)
 }
 
-pub async fn download_file_tcp(
+pub async fn download_client(
     file_id: String,
     file_key: String,
     output_path: Option<PathBuf>,
@@ -492,6 +514,13 @@ pub async fn download_file_tcp(
 
     println!("Downloading: {} ({} bytes)", filename, file_size);
 
+    let progressbar = indicatif::ProgressBar::new(file_size);
+    progressbar.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
+            .progress_chars("#>-"),
+    );
+
     // Read file content
     let output = output_path
         .unwrap_or_else(|| PathBuf::from("."))
@@ -499,7 +528,7 @@ pub async fn download_file_tcp(
 
     let file = fs::File::create(&output).context("Failed to create output file")?;
 
-    let mut file = io::BufWriter::with_capacity(4 * 1024 * 1024, file);
+    let mut file = BufWriter::with_capacity(4 * 1024 * 1024, file);
 
     let mut received: u64 = 0;
     let mut buf = vec![0u8; 32 * 1024];
@@ -514,9 +543,12 @@ pub async fn download_file_tcp(
         }
         file.write_all(&buf[..n]).context("Failed to write file")?;
         received += n as u64;
+        progressbar.inc(to_read as u64);
     }
 
     file.flush().context("Failed to flush file")?;
+
+    progressbar.finish_and_clear();
 
     // Compute hash of downloaded file
     let mut file = fs::File::open(&output).context("Failed to open downloaded file")?;
