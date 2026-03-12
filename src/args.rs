@@ -71,7 +71,7 @@ pub enum ClientCommands {
         port: u16,
 
         /// Protocol version: v1 or v2 (Custom TCP)
-        #[arg(long)]
+        #[arg(long, default_value = "v2")]
         protocol: Option<String>,
 
         /// Lock the file with a key, this arg can be used in CI (default is input prompt)
@@ -83,5 +83,12 @@ pub enum ClientCommands {
         file_id: Option<String>,
     },
 
+    /// Get Status of remote server
+    Status {
+        #[arg(long, default_value = "v2")]
+        protocol: Option<String>,
+    },
+
+    /// List local file map
     Ls {},
 }

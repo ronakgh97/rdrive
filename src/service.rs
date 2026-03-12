@@ -13,7 +13,7 @@ pub async fn serve_tcp_v1(port: Option<u16>) -> Result<()> {
     MASTER_KEY.get_or_init(move || master_key);
 
     let port = port.unwrap_or_else(|| {
-        if let Ok(env_port) = std::env::var("R_STORAGE_PORT") {
+        if let Ok(env_port) = std::env::var("PORT") {
             env_port.parse::<u16>().unwrap_or(3000)
         } else {
             3000
@@ -42,7 +42,7 @@ pub async fn serve_tcp_v2(port: Option<u16>) -> Result<()> {
     MASTER_KEY.get_or_init(move || master_key);
 
     let port = port.unwrap_or_else(|| {
-        if let Ok(env_port) = std::env::var("R_STORAGE_PORT") {
+        if let Ok(env_port) = std::env::var("PORT") {
             env_port.parse::<u16>().unwrap_or(3000)
         } else {
             3000

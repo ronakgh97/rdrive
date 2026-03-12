@@ -4,8 +4,12 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use r_drive::args::{ClientArgs, ClientCommands};
-use r_drive::protocol_v1::{download_client as download_file_v1, upload_client as upload_file_v1};
-use r_drive::protocol_v2::{download_client as download_file_v2, upload_client as upload_file_v2};
+use r_drive::protocol_v1::{
+    download_client as download_file_v1, get_status_v1, upload_client as upload_file_v1,
+};
+use r_drive::protocol_v2::{
+    download_client as download_file_v2, get_status_v2, upload_client as upload_file_v2,
+};
 use r_drive::{Catalog, get_catalog_path};
 use std::io;
 
@@ -134,6 +138,29 @@ async fn main() -> Result<()> {
         }
         Some(ClientCommands::Ls { .. }) => {
             list_file_map().await?;
+        }
+        Some(ClientCommands::Status { protocol }) => {
+            let protocol = protocol.unwrap_or_else(|| "v2".to_string());
+            match protocol.as_str() {
+                "v1" => {
+                    let (time, uptime, total_c, bandwidth) =
+                        get_status_v1("localhost", 3000).await?;
+
+                    println!("Status timestamp: {}", time);
+                    println!("Uptime: {} hrs", uptime);
+                    println!("Total Connections: {}", total_c);
+                    println!("Bandwidth Used: {} gb", bandwidth);
+                }
+                "v2" | _ => {
+                    let (time, uptime, total_c, bandwidth) =
+                        get_status_v2("localhost", 3000).await?;
+
+                    println!("Status timestamp: {}", time);
+                    println!("Uptime: {} hrs", uptime);
+                    println!("Total Connections: {}", total_c);
+                    println!("Bandwidth Used: {} gb", bandwidth);
+                }
+            }
         }
         None => {
             ascii_art();

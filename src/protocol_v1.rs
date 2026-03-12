@@ -1,6 +1,7 @@
 use crate::{
     MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, SERVER_TRACKER,
-    START_TIME, debug, error, file_hasher, get_storage_path_blocking, info, trace, warn,
+    START_TIME, debug, error, file_hasher, get_storage_path_blocking, info, parse_status_line,
+    trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -85,6 +86,7 @@ fn handle_connection(stream: &TcpStream, storage_path: &Path) -> Result<()> {
         "DOWNLOAD" => {
             handle_download(&mut reader, &mut writer, &headers, storage_path)?;
         }
+        "STATUS" => send_status(&mut writer, 200)?,
         _ => {
             send_error(&mut writer, 400, "Unknown command")?;
         }
@@ -153,6 +155,28 @@ pub fn write_frame(writer: &mut BufWriter<TcpStream>, data: &[u8]) -> Result<()>
 fn send_error(writer: &mut BufWriter<TcpStream>, code: u16, message: &str) -> Result<()> {
     let response = format!("ERROR\ncode: {}\nmessage: {}", code, message);
     write_frame(writer, response.as_bytes())?;
+    Ok(())
+}
+
+fn send_status(writer: &mut BufWriter<TcpStream>, code: u16) -> Result<()> {
+    let uptime_hrs = try_get_uptime_hrs();
+
+    let ongoing = ON_GOINGS.len();
+
+    let (total_connections, total_bandwidth_gb) = {
+        let lock = SERVER_TRACKER.read().unwrap();
+        (lock.total_connections, lock.total_bandwidth_gb)
+    };
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+
+    let response = format!(
+        "OK\ncode: {}\ntimestamp: {}\nuptime_hrs: {}\nno_goings_task: {}\ntotal_connections: {}\ntotal_bandwidth_gb: {}\n\n",
+        code, timestamp, ongoing, uptime_hrs, total_connections, total_bandwidth_gb
+    );
+
+    write_frame(writer, response.as_bytes())?;
+
     Ok(())
 }
 
@@ -398,14 +422,14 @@ pub async fn upload_client(
         metadata.len()
     };
 
-    println!("↪ Starting upload: {} ({} bytes)", filename, file_size);
-
-    let file_hash = file_hasher(&path).context("Failed to compute file hash")?;
-    println!("↪ File hash: {}...", file_hash[..8].to_string().dimmed());
-
     let mut stream = TcpStream::connect(format!("{}:{}", host, port))?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+
+    println!("↪ Starting upload: {} ({} bytes)", filename, file_size);
+
+    let file_hash = file_hasher(&path).context("Failed to compute file hash")?;
+    println!("↪ File hash: {}...", file_hash.to_string().dimmed());
 
     let request = format!(
         "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n",
@@ -415,8 +439,8 @@ pub async fn upload_client(
     let progress_bar = indicatif::ProgressBar::new(file_size);
     progress_bar.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:60.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
-            .progress_chars("#>-"),
+            .template("↪ [{bar:60.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+            .progress_chars("$>-"),
     );
 
     // Send header with 2-byte length prefix
@@ -479,7 +503,7 @@ pub async fn upload_client(
     }
 
     println!(
-        "Upload complete. File ID: {}. Time took: {}",
+        "Upload complete. File ID: {} Time took: {}",
         file_id, time_took
     );
 
@@ -498,6 +522,7 @@ pub async fn download_client(
 
     let mut stream = TcpStream::connect(format!("{}:{}", host, port))?;
     stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
 
     let request = format!("DOWNLOAD\nfile-id: {}\nfile-key: {}\n", file_id, file_key);
 
@@ -584,4 +609,37 @@ pub async fn download_client(
 
     println!("Download complete. Saved to: {}", output_path.display());
     Ok(output_path)
+}
+
+// Return format: timestamp. uptime, total_connections, bandwidth in gb
+pub async fn get_status_v1(host: &str, port: u16) -> Result<(String, String, String, String)> {
+    let mut stream = TcpStream::connect(format!("{}:{}", host, port))?;
+
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+
+    let request = "STATUS\n";
+
+    let len = (request.len() as u16).to_be_bytes();
+    stream.write_all(&len)?;
+    stream.write_all(request.as_bytes())?;
+
+    let mut len_buf = [0u8; 2];
+    stream
+        .read_exact(&mut len_buf)
+        .context("Failed to read response length")?;
+    let len = u16::from_be_bytes(len_buf) as usize;
+
+    let mut response = vec![0u8; len];
+    stream
+        .read_exact(&mut response)
+        .context("Failed to read response")?;
+
+    let response = String::from_utf8_lossy(&response);
+
+    if !response.starts_with("OK\n") {
+        anyhow::bail!("Status request failed: {}", response);
+    }
+
+    // Parse
+    Ok(parse_status_line(&response))
 }

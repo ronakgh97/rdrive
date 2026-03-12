@@ -1,7 +1,7 @@
 use crate::{
     MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, SERVER_TRACKER,
-    START_TIME, debug, error, file_hasher, get_storage_path_blocking, info, trace,
-    try_get_uptime_hrs, warn,
+    START_TIME, debug, error, file_hasher, get_storage_path_blocking, info, parse_status_line,
+    trace, try_get_uptime_hrs, warn,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -111,8 +111,7 @@ fn handle_connection(socket: &mut TcpStream, storage_path: &Path) -> Result<()> 
             handle_server_download(&mut reader, &mut writer, &headers, storage_path)?;
         }
         "STATUS" => {
-            let ongoing = ON_GOINGS.len();
-            send_status(&mut writer, 200, ongoing)?;
+            send_status(&mut writer, 200)?;
         }
         "DELETE" => {
             send_error(&mut writer, 501, "DELETE not implemented")?;
@@ -144,17 +143,21 @@ fn send_error(writer: &mut BufWriter<TcpStream>, code: u16, message: &str) -> Re
 }
 
 #[inline]
-fn send_status(writer: &mut BufWriter<TcpStream>, code: u16, no_going_tasks: usize) -> Result<()> {
+fn send_status(writer: &mut BufWriter<TcpStream>, code: u16) -> Result<()> {
     let uptime_hrs = try_get_uptime_hrs();
+
+    let ongoing = ON_GOINGS.len();
 
     let (total_connections, total_bandwidth_gb) = {
         let lock = SERVER_TRACKER.read().unwrap();
         (lock.total_connections, lock.total_bandwidth_gb)
     };
 
+    let timestamp = chrono::Utc::now().to_rfc3339();
+
     let response = format!(
-        "OK\ncode: {}\nuptime_hrs: {}\nno_goings_task: {}\ntotal_connections: {}\ntotal_bandwidth_gb: {}\n\n",
-        code, no_going_tasks, uptime_hrs, total_connections, total_bandwidth_gb
+        "OK\ncode: {}\ntimestamp: {}\nuptime_hrs: {}\nno_goings_task: {}\ntotal_connections: {}\ntotal_bandwidth_gb: {}\n\n",
+        code, timestamp, ongoing, uptime_hrs, total_connections, total_bandwidth_gb
     );
     writer.write_all(response.as_bytes())?;
 
@@ -393,25 +396,24 @@ pub async fn upload_client(
     let metadata = fs::metadata(&file_path).context("Failed to read file metadata")?;
     let file_size = metadata.len();
 
+    // Connect to server
+    let mut stream =
+        TcpStream::connect(format!("{}:{}", host, port)).context("Failed to connect to server")?;
+    stream.set_nodelay(true).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+
     println!("↪ Starting upload: {} ({} bytes)", filename, file_size);
 
     // Compute file hash (CPU-bound, so do it before connecting to server)
     let file_hash = file_hasher(&file_path).context("Failed to compute file hash")?;
-    println!("↪ File hash: {}...", file_hash[..8].to_string().dimmed());
+    println!("↪ File hash: {}...", file_hash.to_string().dimmed());
 
     let progressbar = indicatif::ProgressBar::new(file_size);
     progressbar.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
+            .template("↪ [{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
             .progress_chars("&>-"),
     );
-
-    // Connect to server
-    let mut stream =
-        TcpStream::connect(format!("{}:{}", host, port)).context("Failed to connect to server")?;
-
-    stream.set_nodelay(true).ok();
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
 
     // Send UPLOAD request
     let request = format!(
@@ -589,4 +591,34 @@ pub async fn download_client(
 
     println!("Download successful. Saved to: {}", output.display());
     Ok(output)
+}
+
+pub async fn get_status_v2(host: &str, port: u16) -> Result<(String, String, String, String)> {
+    let mut stream =
+        TcpStream::connect(format!("{}:{}", host, port)).context("Failed to connect to server")?;
+
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+
+    let request = "STATUS\n\n";
+    stream
+        .write_all(request.as_bytes())
+        .context("Failed to send request")?;
+
+    let mut reader = BufReader::with_capacity(NETWORK_BUFFER_SIZE, stream);
+    let mut response = String::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        response.push_str(&line);
+        if line == "\n" {
+            break;
+        }
+    }
+
+    // Parse the response
+    if response.starts_with("ERROR") {
+        anyhow::bail!("Failed to get status: {}", response);
+    }
+
+    Ok(parse_status_line(&response))
 }

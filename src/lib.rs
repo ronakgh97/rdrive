@@ -18,7 +18,7 @@ pub mod service;
 pub async fn get_storage_path() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
-    let storage_path = home_dir.join(".r_storage").join("storage");
+    let storage_path = home_dir.join(".rdrive").join("storage");
     Ok(storage_path)
 }
 
@@ -26,7 +26,7 @@ pub async fn get_storage_path() -> Result<PathBuf> {
 pub fn get_storage_path_blocking() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
-    let storage_path = home_dir.join(".r_storage").join("storage");
+    let storage_path = home_dir.join(".rdrive").join("storage");
     Ok(storage_path)
 }
 
@@ -34,7 +34,7 @@ pub fn get_storage_path_blocking() -> Result<PathBuf> {
 pub fn get_catalog_path() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    let path = home_dir.join(".r_storage").join("catalog.bin");
+    let path = home_dir.join(".rdrive").join("catalog.bin");
     Ok(path)
 }
 
@@ -56,6 +56,31 @@ pub fn file_hasher(path: &Path) -> Result<String> {
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[inline]
+pub fn parse_status_line(status_response: &str) -> (String, String, String, String) {
+    let mut timestamp = String::new();
+    let mut uptime_hrs = String::new();
+    let mut total_connections = String::new();
+    let mut total_bandwidth_gb = String::new();
+
+    for line in status_response.lines() {
+        if let Some(r) = line.strip_prefix("timestamp: ") {
+            timestamp = r.trim().to_string();
+        }
+        if let Some(r) = line.strip_prefix("uptime_hrs: ") {
+            uptime_hrs = r.trim().to_string();
+        }
+        if let Some(r) = line.strip_prefix("total_connections: ") {
+            total_connections = r.trim().to_string();
+        }
+        if let Some(r) = line.strip_prefix("total_bandwidth_gb: ") {
+            total_bandwidth_gb = r.trim().to_string();
+        }
+    }
+
+    (timestamp, uptime_hrs, total_connections, total_bandwidth_gb)
 }
 
 #[inline(always)]
