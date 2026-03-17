@@ -428,7 +428,7 @@ pub async fn upload_client(
     let file = fs::File::open(&file_path).context("Failed to reopen file")?;
 
     let mut raw_file = BufReader::with_capacity(NETWORK_BUFFER_SIZE * 2, file);
-    let mut buf_file = vec![0u8; READ_CHUNK_SIZE * 3];
+    let mut buf_file = vec![0u8; READ_CHUNK_SIZE * 2];
 
     loop {
         let n = raw_file
@@ -476,6 +476,8 @@ pub async fn upload_client(
             time_took = time.trim().to_string();
         }
     }
+
+    reader.get_ref().shutdown(std::net::Shutdown::Both).ok();
 
     println!("File ID: {} - Time took: {}", file_id, time_took);
 
@@ -585,6 +587,8 @@ pub async fn download_client(
             computed_hash
         );
     }
+
+    reader.get_ref().shutdown(std::net::Shutdown::Both).ok();
 
     println!("Saved to: {}", output.display());
     Ok(output)

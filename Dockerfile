@@ -14,7 +14,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-RUN cargo build --release --bin rds
+RUN cargo build --release --bin rdrive-server
 
 FROM debian:bookworm-slim
 
@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/rds /app/rds
+COPY --from=builder /app/target/release/rdrive-server /app/rdrive-server
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
@@ -39,7 +39,7 @@ EXPOSE 3000
 ENV LOG_LEVEL=debug
 ENV HOME=/home/rdrive
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD test -f /app/rds || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD test -f /app/rdrive-server || exit 1
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 

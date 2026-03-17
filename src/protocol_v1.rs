@@ -86,6 +86,9 @@ fn handle_connection(stream: &TcpStream, storage_path: &Path) -> Result<()> {
         "DOWNLOAD" => {
             handle_download(&mut reader, &mut writer, &headers, storage_path)?;
         }
+        "DELETE" => {
+            send_error(&mut writer, 501, "DELETE not implemented")?;
+        }
         "STATUS" => send_status(&mut writer, 200)?,
         _ => {
             send_error(&mut writer, 400, "Unknown command")?;
@@ -155,6 +158,8 @@ pub fn write_frame(writer: &mut BufWriter<TcpStream>, data: &[u8]) -> Result<()>
 fn send_error(writer: &mut BufWriter<TcpStream>, code: u16, message: &str) -> Result<()> {
     let response = format!("ERROR\ncode: {}\nmessage: {}", code, message);
     write_frame(writer, response.as_bytes())?;
+
+    writer.get_ref().shutdown(Shutdown::Write)?;
     Ok(())
 }
 
@@ -176,6 +181,8 @@ fn send_status(writer: &mut BufWriter<TcpStream>, code: u16) -> Result<()> {
     );
 
     write_frame(writer, response.as_bytes())?;
+
+    writer.get_ref().shutdown(Shutdown::Write)?;
 
     Ok(())
 }
@@ -392,8 +399,6 @@ fn handle_download(
     // Shutdown the write half of the connection to signal end of data
     writer.get_ref().shutdown(Shutdown::Write)?;
 
-    info!("Download complete: {}", file_id);
-
     info!("Download complete: File-ID: {}", file_id);
 
     let mut lock = SERVER_TRACKER.write().unwrap();
@@ -502,6 +507,8 @@ pub async fn upload_client(
         }
     }
 
+    stream.shutdown(Shutdown::Both).ok();
+
     println!("File ID: {} - Time took: {}", file_id, time_took);
 
     Ok(file_id)
@@ -603,6 +610,8 @@ pub async fn download_client(
             computed_hash
         );
     }
+
+    stream.shutdown(Shutdown::Both).ok();
 
     println!("Saved to: {}", output_path.display());
     Ok(output_path)

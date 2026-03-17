@@ -124,6 +124,12 @@ fn client_download(port: u16, file_id: &str, file_key: &str) -> Vec<u8> {
         received.extend_from_slice(&chunk[..n]);
     }
 
+    assert_eq!(
+        received.len() as u64,
+        file_size,
+        "Downloaded file size mismatch"
+    );
+
     // Check hash
     let mut hasher = Sha256::new();
     hasher.update(&received);
@@ -278,6 +284,12 @@ fn v1_client_download(port: u16, file_id: &str, file_key: &str) -> Vec<u8> {
         }
         received.extend_from_slice(&chunk[..n]);
     }
+
+    assert_eq!(
+        received.len() as u64,
+        file_size,
+        "v1 downloaded file size mismatch"
+    );
 
     let mut hasher = Sha256::new();
     hasher.update(&received);

@@ -17,7 +17,7 @@ services:
     command: [ "serve" ]
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "test", "-f", "/app/rds" ]
+      test: [ "CMD", "test", "-f", "/app/rdrive-server" ]
       interval: 30s
       timeout: 3s
       start_period: 10s
