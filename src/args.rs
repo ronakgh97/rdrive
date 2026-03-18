@@ -42,7 +42,7 @@ pub struct ClientArgs {
 #[derive(Subcommand)]
 pub enum ClientCommands {
     /// Upload a file to the server
-    Upload {
+    Push {
         /// Path to the file to upload
         #[arg(short, long)]
         file: PathBuf,
@@ -61,7 +61,7 @@ pub enum ClientCommands {
     },
 
     /// Download a file from the server
-    Download {
+    Pull {
         /// Output path for the downloaded file (default: current directory)
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -85,6 +85,9 @@ pub enum ClientCommands {
 
     /// Get Status of remote server
     Status {
+        #[arg(long, default_value = "3000")]
+        port: Option<u16>,
+
         #[arg(long, default_value = "v2")]
         protocol: Option<String>,
     },

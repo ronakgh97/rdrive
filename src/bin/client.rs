@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     let args = ClientArgs::parse();
 
     match args.command {
-        Some(ClientCommands::Upload {
+        Some(ClientCommands::Push {
             file,
             port,
             protocol,
@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
                 upload_file_v2(file, file_key, "localhost", port).await?;
             }
         }
-        Some(ClientCommands::Download {
+        Some(ClientCommands::Pull {
             output,
             port,
             protocol,
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
             file_id,
         }) => {
             if output.as_ref().map(|p| p.exists()).unwrap_or(false) {
-                print!("File already exists. Do you want to overwrite it? (y/n): ");
+                print!("File alread`y exists. Do you want to overwrite it? (y/n): ");
                 let y: String = {
                     io::Write::flush(&mut io::stdout())?;
                     let mut input = String::new();
@@ -139,12 +139,13 @@ async fn main() -> Result<()> {
         Some(ClientCommands::Ls { .. }) => {
             list_file_map().await?;
         }
-        Some(ClientCommands::Status { protocol }) => {
+        Some(ClientCommands::Status { port, protocol }) => {
+            let port = port.unwrap_or(3000);
             let protocol = protocol.unwrap_or_else(|| "v2".to_string());
             match protocol.as_str() {
                 "v1" => {
                     let (time, uptime, total_c, bandwidth) =
-                        get_status_v1("localhost", 3000).await?;
+                        get_status_v1("localhost", port).await?;
 
                     println!("Status timestamp: {}", time);
                     println!("Uptime: {} hrs", uptime);
@@ -153,7 +154,7 @@ async fn main() -> Result<()> {
                 }
                 "v2" | _ => {
                     let (time, uptime, total_c, bandwidth) =
-                        get_status_v2("localhost", 3000).await?;
+                        get_status_v2("localhost", port).await?;
 
                     println!("Status timestamp: {}", time);
                     println!("Uptime: {} hrs", uptime);

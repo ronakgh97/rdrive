@@ -37,14 +37,15 @@ docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name
 Use this client wrapper (You can write your own client, read [Protocol](PROTOCOL.md))
 
 ```shell
-rdrive upload --file dummy.bin --port 3000 --protocol v2        
+rdrive push --file dummy.bin --port 3000 --protocol v2        
 Enter a lock key: ronak
 ↪ Starting upload: dummy.bin (1180000000 bytes)
 ↪ File hash: ef5bfea558b31b8ecf673a0445ec035394f9a3a40fad69cd8a9ad1c5f5aaf56b...
 File ID: 2e8e2c5e-9f36-4369-802f-81d6b7fc0e69 - Time took: 3.350482605
+````
 
-
-rdrive download --output . --port 3000 --protocol v2            
+```shell
+rdrive pull --output . --port 3000 --protocol v2            
 File already exists. Do you want to overwrite it? (y/n): y
 Enter file ID: 2e8e2c5e-9f36-4369-802f-81d6b7fc0e69
 Enter file key: ronak
