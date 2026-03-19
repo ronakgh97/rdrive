@@ -41,7 +41,7 @@ echo "Original hash: $ORIGINAL_HASH"
 # Test v1
 echo "Testing v1 client binary upload"
 FILE_ID=$(docker exec rdrive-server-v1 /app/target/release/rdrive \
-  upload --file $TEST_FILE --port 3000 --protocol v1 --file-key testkey123 2>&1)
+  push --file $TEST_FILE --port 3000 --protocol v1 --file-key testkey123 2>&1)
 echo "v1 upload output: $FILE_ID"
 
 # Extract file-id from output
@@ -50,7 +50,7 @@ echo "v1 file-id: $FILE_ID"
 
 echo "Testing v1 client binary download"
 docker exec rdrive-server-v1 /app/target/release/rdrive \
-  download --file-id "$FILE_ID" --file-key testkey123 --port 3000 --protocol v1 --output /tmp/test_download.bin 2>&1
+  pull --file-id "$FILE_ID" --file-key testkey123 --port 3000 --protocol v1 --output /tmp/test_download.bin 2>&1
 
 # Verify checksum
 DOWNLOAD_HASH=$(docker exec rdrive-server-v1 md5sum /tmp/test_download.bin | awk '{print $1}')
@@ -65,7 +65,7 @@ echo "v1 passed!"
 # Test v2
 echo "Testing v2 client binary upload"
 FILE_ID=$(docker exec rdrive-server-v2 /app/target/release/rdrive \
-  upload --file $TEST_FILE --port 3001 --protocol v2 --file-key testkey123 2>&1)
+  push --file $TEST_FILE --port 3001 --protocol v2 --file-key testkey123 2>&1)
 echo "v2 upload output: $FILE_ID"
 
 FILE_ID=$(echo "$FILE_ID" | grep -o '[a-f0-9-]\{36\}' | head -1)
@@ -73,7 +73,7 @@ echo "v2 file-id: $FILE_ID"
 
 echo "Testing v2 client binary download"
 docker exec rdrive-server-v2 /app/target/release/rdrive \
-  download --file-id "$FILE_ID" --file-key testkey123 --port 3001 --protocol v2 --output /tmp/test_download.bin 2>&1
+  pull --file-id "$FILE_ID" --file-key testkey123 --port 3001 --protocol v2 --output /tmp/test_download.bin 2>&1
 
 DOWNLOAD_HASH=$(docker exec rdrive-server-v2 md5sum /tmp/test_download.bin | awk '{print $1}')
 echo "v2 downloaded hash: $DOWNLOAD_HASH"

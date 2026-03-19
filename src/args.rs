@@ -62,9 +62,9 @@ pub enum ClientCommands {
 
     /// Download a file from the server
     Pull {
-        /// Output path for the downloaded file (default: current directory)
+        /// Output dir for the downloaded file (default: current directory)
         #[arg(short, long)]
-        output: Option<PathBuf>,
+        dir: Option<PathBuf>,
 
         /// Port to connect to the server (default: 3000)
         #[arg(short, long)]
@@ -90,6 +90,32 @@ pub enum ClientCommands {
 
         #[arg(long, default_value = "v2")]
         protocol: Option<String>,
+    },
+
+    /// Stream a file to oter clients via Zero-copy relay
+    Serve {
+        /// Path to the file to send over
+        #[arg(short, long)]
+        file: PathBuf,
+
+        /// Port to connect to the server (default: 3000)
+        #[arg(short, long)]
+        port: u16,
+    },
+
+    /// Get a stream file and write to disk, simliar to `pull` but with zero-copy relay, so it can be used for large files without consuming much memory
+    Listen {
+        /// Output dir for the streamed file (default: current directory)
+        #[arg(short, long)]
+        dir: Option<PathBuf>,
+
+        /// Secure code
+        #[arg(short, long)]
+        code: String,
+
+        /// Port to connect to the server (default: 3000)
+        #[arg(short, long)]
+        port: u16,
     },
 
     /// List local file map

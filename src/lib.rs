@@ -587,3 +587,12 @@ impl Default for Tracker {
         }
     }
 }
+
+pub struct RelaySession {
+    pub session_id: String,
+    pub sender_socket: Option<tokio::net::TcpStream>,
+    pub receiver_socket: Option<tokio::net::TcpStream>,
+    pub created_at: chrono::DateTime<chrono::Local>,
+}
+
+pub static ACTIVE_SESSION: LazyLock<DashMap<String, RelaySession>> = LazyLock::new(DashMap::new);

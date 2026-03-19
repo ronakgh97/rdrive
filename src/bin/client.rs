@@ -72,28 +72,12 @@ async fn main() -> Result<()> {
             }
         }
         Some(ClientCommands::Pull {
-            output,
+            dir,
             port,
             protocol,
             file_key,
             file_id,
         }) => {
-            if output.as_ref().map(|p| p.exists()).unwrap_or(false) {
-                print!("File alread`y exists. Do you want to overwrite it? (y/n): ");
-                let y: String = {
-                    io::Write::flush(&mut io::stdout())?;
-                    let mut input = String::new();
-                    io::stdin().read_line(&mut input)?;
-                    input.trim().to_lowercase()
-                };
-
-                // LOL
-                if y != "y" {
-                    println!("Aborted");
-                    std::process::exit(0);
-                }
-            }
-
             let (file_id, file_key) = if let (Some(id), Some(key)) = (file_id, file_key) {
                 (id, key)
             } else {
@@ -126,16 +110,18 @@ async fn main() -> Result<()> {
             if let Some(protocol) = protocol {
                 match protocol.as_str() {
                     "v1" => {
-                        download_file_v1(file_id, file_key, output, "127.0.0.1", port).await?;
+                        download_file_v1(file_id, file_key, dir, "127.0.0.1", port).await?;
                     }
                     "v2" | _ => {
-                        download_file_v2(file_id, file_key, output, "localhost", port).await?;
+                        download_file_v2(file_id, file_key, dir, "localhost", port).await?;
                     }
                 }
             } else {
-                download_file_v2(file_id, file_key, output, "localhost", port).await?;
+                download_file_v2(file_id, file_key, dir, "localhost", port).await?;
             }
         }
+        Some(ClientCommands::Serve { .. }) => {}
+        Some(ClientCommands::Listen { .. }) => {}
         Some(ClientCommands::Ls { .. }) => {
             list_file_map().await?;
         }
