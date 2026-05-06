@@ -478,6 +478,8 @@ pub async fn upload_client(
     writer.write_all(request.as_bytes()).await?;
     writer.flush().await.context("Failed to flush request")?;
 
+    // TODO: Listen for ACK
+
     let file = tokio::fs::File::open(&path)
         .await
         .context("Failed to reopen file")?;

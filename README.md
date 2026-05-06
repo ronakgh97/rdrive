@@ -48,6 +48,7 @@ TODO
 - Still some buffering issues, data gets stalls, does not flush properly
 - Multi-port support for better concurrency
 - rsync support (rolling hashing, delta transfers, etc.)
+- Serialized headers, rm fragile parsing
 
 ISSUE
 

@@ -52,7 +52,7 @@ pub enum ClientCommands {
         port: u16,
 
         /// Protocol version: v1 default or v2 (Custom TCP)
-        #[arg(long, default_value = "v2")]
+        #[arg(long, default_value = "v1")]
         protocol: String,
 
         /// Lock the file with a key, can be used in CI (default is input prompt)
@@ -71,7 +71,7 @@ pub enum ClientCommands {
         port: u16,
 
         /// Protocol version: v1 default or v2 (Custom TCP)
-        #[arg(long, default_value = "v2")]
+        #[arg(long, default_value = "v1")]
         protocol: String,
 
         /// Lock the file with a key, this arg can be used in CI (default is input prompt)

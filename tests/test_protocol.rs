@@ -1,5 +1,4 @@
-use r_drive::{SERVER_TRACKER, get_storage_path_blocking};
-use rand::RngExt;
+use r_drive::{SERVER_TRACKER, fill_random_bytes, get_storage_path};
 use sha2::{Digest, Sha256};
 use std::io::ErrorKind;
 use std::net::TcpListener;
@@ -18,23 +17,15 @@ fn share_serial_lock() -> &'static tokio::sync::Mutex<()> {
     SHARED_TRACKER.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-#[inline(always)]
-fn fill_random_bytes(buf: &mut [u8]) {
-    let mut rng = rand::rng();
-    buf.iter_mut().for_each(|b| *b = rng.random::<u8>());
-}
-
 fn free_port() -> u16 {
     let bind = TcpListener::bind("127.0.0.1:0").unwrap();
     bind.local_addr().unwrap().port()
 }
 
-fn storage_path() -> std::path::PathBuf {
-    get_storage_path_blocking().unwrap()
-}
-
 async fn cleanup_storage_dir() {
-    let path = storage_path();
+    let path = get_storage_path()
+        .await
+        .expect("Failed to get storage path");
     if let Err(err) = tokio::fs::remove_dir_all(&path).await {
         assert_eq!(
             err.kind(),
@@ -60,8 +51,7 @@ async fn wait_for_server(port: u16) {
 }
 
 async fn start_server_v2(port: u16) -> JoinHandle<()> {
-    let path = get_storage_path_blocking().unwrap();
-
+    let path = get_storage_path().await.unwrap();
     tokio::fs::create_dir_all(&path).await.unwrap();
 
     let handle = tokio::spawn(async move {
@@ -75,8 +65,7 @@ async fn start_server_v2(port: u16) -> JoinHandle<()> {
 }
 
 async fn start_server_v1(port: u16) -> JoinHandle<()> {
-    let path = get_storage_path_blocking().unwrap();
-
+    let path = get_storage_path().await.unwrap();
     tokio::fs::create_dir_all(&path).await.unwrap();
 
     let handle = tokio::spawn(async move {

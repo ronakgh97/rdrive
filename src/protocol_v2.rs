@@ -16,7 +16,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-// TODO: THIS IS WILL COMPLETELY REWRITTEN USING `UDP` LATER, PROTOCOL_V1 -> TCP WHILE PROTOCOL_V2 -> UDP
+// TODO: THIS IS WILL BE FREEZE & COMPLETELY REWRITTEN USING `UDP` LATER
+//  PROTOCOL_V1 -> TCP WHILE PROTOCOL_V2 -> UDP
 
 /// Entry-point for TCP server, listens for incoming connections and spawns a task for each connection to handle the request
 pub async fn start_tcp_server(
