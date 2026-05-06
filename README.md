@@ -49,6 +49,7 @@ TODO
 - Multi-port support for better concurrency
 - rsync support (rolling hashing, delta transfers, etc.)
 - Serialized headers, rm fragile parsing
+- Add proper user-space (multiple users)
 
 ISSUE
 

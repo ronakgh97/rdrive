@@ -5,9 +5,6 @@ use r_drive::args::{ClientArgs, ClientCommands};
 use r_drive::protocol_v1::{
     download_client as download_file_v1, get_status_v1, upload_client as upload_file_v1,
 };
-use r_drive::protocol_v2::{
-    download_client as download_file_v2, get_status_v2, upload_client as upload_file_v2,
-};
 use r_drive::{Catalog, get_catalog_path};
 use std::io;
 
@@ -43,7 +40,7 @@ async fn main() -> Result<()> {
 
             let key = match protocol.as_str() {
                 "v1" => upload_file_v1(file.clone(), file_key, "127.0.0.1", port).await?,
-                "v2" => upload_file_v2(file.clone(), file_key, "localhost", port).await?,
+                "v2" => todo!("UDP protocol is WIP"),
                 _ => {
                     eprintln!("Unknown protocol: {}", protocol);
                     std::process::exit(1);
@@ -110,7 +107,7 @@ async fn main() -> Result<()> {
                     download_file_v1(file_id, file_key, dir, "127.0.0.1", port).await?;
                 }
                 "v2" => {
-                    download_file_v2(file_id, file_key, dir, "localhost", port).await?;
+                    todo!("UDP protocol is WIP")
                 }
                 _ => {
                     eprintln!("Unknown protocol: {}", protocol);
@@ -129,20 +126,18 @@ async fn main() -> Result<()> {
         }
         Some(ClientCommands::Status { port, protocol }) => match protocol.as_str() {
             "v1" => {
-                let (time, uptime, total_c, bandwidth) = get_status_v1("localhost", port).await?;
+                let status = get_status_v1("localhost", port).await?;
 
-                println!("Status timestamp: {}", time);
-                println!("Uptime: {} hrs", uptime);
-                println!("Total Connections: {}", total_c);
-                println!("Bandwidth Used: {} gb", bandwidth);
+                println!("Status timestamp: {}", status.timestamp);
+                println!("Uptime: {} hrs", status.uptime_hrs);
+                println!(
+                    "Total {} uploads, {} downloads",
+                    status.total_uploaded, status.total_downloaded
+                );
+                println!("Bandwidth used: {} gb", status.total_bandwidth_used);
             }
             "v2" => {
-                let (time, uptime, total_c, bandwidth) = get_status_v2("localhost", port).await?;
-
-                println!("Status timestamp: {}", time);
-                println!("Uptime: {} hrs", uptime);
-                println!("Total Connections: {}", total_c);
-                println!("Bandwidth Used: {} gb", bandwidth);
+                todo!("UDP protocol is WIP")
             }
             _ => {
                 println!("Unknown protocol: {}", protocol);

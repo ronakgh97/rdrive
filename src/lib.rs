@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 pub mod args;
-mod header;
+pub mod header;
 pub mod log;
 pub mod protocol_v1;
 pub mod protocol_v2;
@@ -68,32 +68,6 @@ pub fn file_hasher(path: &Path) -> Result<String> {
 pub async fn file_hasher_async(path: &Path) -> Result<String> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || file_hasher(&path)).await?
-}
-
-/// Returns (timestamp, uptime_hrs, total_connections, total_bandwidth_gb)
-#[inline(always)]
-pub fn parse_status_line(status_response: &str) -> (String, String, String, String) {
-    let mut timestamp = String::new();
-    let mut uptime_hrs = String::new();
-    let mut total_connections = String::new();
-    let mut total_bandwidth_gb = String::new();
-
-    for line in status_response.lines() {
-        if let Some(r) = line.strip_prefix("TIMESTAMP: ") {
-            timestamp = r.trim().to_string();
-        }
-        if let Some(r) = line.strip_prefix("UPTIME_HRS: ") {
-            uptime_hrs = r.trim().to_string();
-        }
-        if let Some(r) = line.strip_prefix("TOTAL_CONNECTIONS: ") {
-            total_connections = r.trim().to_string();
-        }
-        if let Some(r) = line.strip_prefix("TOTAL_BANDWIDTH_GB: ") {
-            total_bandwidth_gb = r.trim().to_string();
-        }
-    }
-
-    (timestamp, uptime_hrs, total_connections, total_bandwidth_gb)
 }
 
 #[inline(always)]
@@ -257,15 +231,14 @@ pub fn decrypt_data(data: &[u8], key: &[u8]) -> Vec<u8> {
 }
 
 pub static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
-pub static ON_GOINGS: LazyLock<DashMap<String, String>> = LazyLock::new(DashMap::new);
+pub static SHARED_FILE_LOCK: LazyLock<DashMap<String, String>> = LazyLock::new(DashMap::new);
 pub static MASTER_KEY: OnceLock<String> = OnceLock::new();
 pub static MAX_CONNECTIONS: OnceLock<usize> = OnceLock::new();
 pub static MAX_FILE_SIZE: LazyLock<u64> = LazyLock::new(|| {
-    // 8 GB default
     std::env::var("MAX_FILE_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(8 * 1024 * 1024 * 1024)
+        .unwrap_or(8 * 1024 * 1024 * 1024) // 8 GB default
 });
 
 pub static SERVER_TRACKER: LazyLock<Arc<RwLock<Tracker>>> =
@@ -288,15 +261,15 @@ pub fn try_get_master_key() -> Option<String> {
     MASTER_KEY.get().cloned()
 }
 
-pub const NETWORK_BUFFER_SIZE: usize = 4 * 1024 * 1024;
-
-pub const READ_CHUNK_SIZE: usize = 64 * 1024;
-
 #[inline(always)]
 pub fn fill_random_bytes(buf: &mut [u8]) {
     let mut rng = rand::rng();
     buf.iter_mut().for_each(|b| *b = rng.random::<u8>());
 }
+pub const NETWORK_READ_BUFFER: usize = 4 * 1024 * 1024;
+pub const NETWORK_WRITE_BUFFER: usize = 8 * 1024 * 1024;
+pub const READ_CHUNK_SIZE: usize = 64 * 1024;
+pub const WRITE_CHUNK_SIZE: usize = 96 * 1024;
 
 // For Header only
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -305,14 +278,16 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 pub struct Tracker {
     // TODO: Add more
-    pub total_connections: usize,
+    pub total_download: usize,
+    pub total_uploaded: usize,
     pub total_bandwidth_gb: f64,
 }
 
 impl Default for Tracker {
     fn default() -> Self {
         Tracker {
-            total_connections: 0,
+            total_uploaded: 0,
+            total_download: 0,
             total_bandwidth_gb: 0.0,
         }
     }

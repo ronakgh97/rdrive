@@ -88,7 +88,7 @@ pub enum ClientCommands {
         #[arg(long, default_value = "3000")]
         port: u16,
 
-        #[arg(long, default_value = "v2")]
+        #[arg(long, default_value = "v1")]
         protocol: String,
     },
 

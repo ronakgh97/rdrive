@@ -1,3 +1,6 @@
+use r_drive::header::{
+    Command, DownloadHeader, DownloadResponse, ErrorHeader, UploadHeader, UploadResponse,
+};
 use r_drive::{SERVER_TRACKER, fill_random_bytes, get_storage_path};
 use sha2::{Digest, Sha256};
 use std::io::ErrorKind;
@@ -13,7 +16,7 @@ pub const GARBAGE_SIZE: usize = 32 * 1024 * 1024;
 
 static SHARED_TRACKER: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-fn share_serial_lock() -> &'static tokio::sync::Mutex<()> {
+fn share_lock() -> &'static tokio::sync::Mutex<()> {
     SHARED_TRACKER.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
@@ -22,7 +25,7 @@ fn free_port() -> u16 {
     bind.local_addr().unwrap().port()
 }
 
-async fn cleanup_storage_dir() {
+async fn cleanup_storage() {
     let path = get_storage_path()
         .await
         .expect("Failed to get storage path");
@@ -38,7 +41,7 @@ async fn cleanup_storage_dir() {
 }
 
 async fn wait_for_server(port: u16) {
-    for _ in 0..80 {
+    for _ in 0..64 {
         if TcpStream::connect(format!("127.0.0.1:{}", port))
             .await
             .is_ok()
@@ -48,20 +51,6 @@ async fn wait_for_server(port: u16) {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("Server was not ready on port {}", port);
-}
-
-async fn start_server_v2(port: u16) -> JoinHandle<()> {
-    let path = get_storage_path().await.unwrap();
-    tokio::fs::create_dir_all(&path).await.unwrap();
-
-    let handle = tokio::spawn(async move {
-        r_drive::protocol_v2::start_tcp_server(port, 128, Arc::new(path))
-            .await
-            .unwrap();
-    });
-
-    wait_for_server(port).await;
-    handle
 }
 
 async fn start_server_v1(port: u16) -> JoinHandle<()> {
@@ -83,120 +72,16 @@ async fn stop_server(handle: JoinHandle<()>) {
     let _ = handle.await;
 }
 
-async fn v2_read_header(stream: &mut TcpStream) -> String {
-    let mut response = String::new();
-    let mut prev = b'\0';
-    let mut buf = [0u8; 1]; // Byte by Byte
-
-    loop {
-        let n = stream.read(&mut buf).await.unwrap();
-        if n == 0 {
-            break;
-        }
-
-        response.push(buf[0] as char);
-        if prev == b'\n' && buf[0] == b'\n' {
-            break;
-        }
-        prev = buf[0];
-    }
-
-    response
-}
-
-async fn v2_client_upload(port: u16, data: &[u8], filename: &str, file_key: &str) -> String {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .await
-        .unwrap();
-
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let file_hash = hex::encode(hasher.finalize()).to_string();
-
-    let request = format!(
-        "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n\n",
-        filename,
-        data.len(),
-        file_hash,
-        file_key
-    );
-
-    stream.write_all(request.as_bytes()).await.unwrap();
-    stream.write_all(data).await.unwrap();
-    stream.flush().await.unwrap();
-
-    let response = v2_read_header(&mut stream).await;
-    assert!(response.starts_with("OK\n"), "Upload failed: {}", response);
-
-    response
-        .lines()
-        .find_map(|l| l.strip_prefix("file-id: ").map(|s| s.trim().to_string()))
-        .expect("No file-id in upload response")
-}
-
-async fn v2_client_download(port: u16, file_id: &str, file_key: &str) -> Vec<u8> {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .await
-        .unwrap();
-
-    let request = format!("DOWNLOAD\nfile-id: {}\nfile-key: {}\n\n", file_id, file_key);
-    stream.write_all(request.as_bytes()).await.unwrap();
-
-    let headers = v2_read_header(&mut stream).await;
-    assert!(
-        !headers.starts_with("ERROR"),
-        "Download failed: {}",
-        headers
-    );
-
-    let file_size: u64 = headers
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("file-size: ")
-                .and_then(|v| v.trim().parse().ok())
-        })
-        .expect("No file-size in download response");
-
-    let file_hash: String = headers
-        .lines()
-        .find_map(|l| l.strip_prefix("file-hash: ").map(|s| s.trim().to_string()))
-        .expect("No file-hash in download response");
-
-    let mut received = Vec::with_capacity(file_size as usize);
-    let mut chunk = vec![0u8; 32 * 1024];
-    while received.len() < file_size as usize {
-        let to_read = std::cmp::min(chunk.len(), file_size as usize - received.len());
-        let n = stream.read(&mut chunk[..to_read]).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        received.extend_from_slice(&chunk[..n]);
-    }
-
-    assert_eq!(
-        received.len() as u64,
-        file_size,
-        "Downloaded file size mismatch"
-    );
-
-    let mut hasher = Sha256::new();
-    hasher.update(&received);
-    let received_hash = hex::encode(hasher.finalize()).to_string();
-    assert_eq!(file_hash, received_hash, "Downloaded file hash mismatch");
-
-    received
-}
-
 async fn write_frame(stream: &mut TcpStream, data: &[u8]) {
-    let len = (data.len() as u16).to_be_bytes();
+    let len = (data.len() as u32).to_be_bytes();
     stream.write_all(&len).await.unwrap();
     stream.write_all(data).await.unwrap();
 }
 
 async fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
-    let mut len_buf = [0u8; 2];
+    let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.unwrap();
-    let len = u16::from_be_bytes(len_buf) as usize;
+    let len = u32::from_be_bytes(len_buf) as usize;
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await.unwrap();
     buf
@@ -211,30 +96,46 @@ async fn v1_client_upload(port: u16, data: &[u8], filename: &str, file_key: &str
     hasher.update(data);
     let file_hash = hex::encode(hasher.finalize()).to_string();
 
-    let request = format!(
-        "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n",
-        filename,
-        data.len(),
+    let header = UploadHeader {
+        file_name: filename.to_string(),
+        file_size: data.len() as u64,
         file_hash,
-        file_key
-    );
+        file_key: file_key.to_string(),
+    };
+    let request_bytes = Command::Upload(header).serialize().unwrap();
 
-    write_frame(&mut stream, request.as_bytes()).await;
+    write_frame(&mut stream, &request_bytes).await;
     stream.write_all(data).await.unwrap();
     stream.flush().await.unwrap();
 
-    let resp_bytes = read_frame(&mut stream).await;
-    let response = String::from_utf8_lossy(&resp_bytes);
-    assert!(
-        response.starts_with("OK\n"),
-        "v1 upload failed: {}",
-        response
-    );
+    let ack_bytes = read_frame(&mut stream).await;
+    match ack_bytes.first().copied() {
+        Some(1) => {}
+        Some(2) => {
+            let err = ErrorHeader::deserialize(&ack_bytes[1..]).unwrap();
+            panic!(
+                "v1 upload failed during ACK: {} - {}",
+                err.code, err.message
+            );
+        }
+        Some(other) => panic!("v1 upload failed: unexpected ACK tag {}", other),
+        None => panic!("v1 upload failed: empty ACK frame"),
+    }
 
-    response
-        .lines()
-        .find_map(|l| l.strip_prefix("file-id: ").map(|s| s.trim().to_string()))
-        .expect("No file-id in v1 upload response")
+    let resp_bytes = read_frame(&mut stream).await;
+    match resp_bytes.first().copied() {
+        Some(1) => {}
+        Some(2) => {
+            let err = ErrorHeader::deserialize(&resp_bytes[1..]).unwrap();
+            panic!("v1 upload failed: {} - {}", err.code, err.message);
+        }
+        Some(other) => panic!("v1 upload failed: unexpected response tag {}", other),
+        None => panic!("v1 upload failed: empty response frame"),
+    }
+
+    let response = UploadResponse::deserialize(&resp_bytes[1..]).unwrap();
+
+    response.file_id
 }
 
 async fn v1_client_download(port: u16, file_id: &str, file_key: &str) -> Vec<u8> {
@@ -242,30 +143,30 @@ async fn v1_client_download(port: u16, file_id: &str, file_key: &str) -> Vec<u8>
         .await
         .unwrap();
 
-    let request = format!("DOWNLOAD\nfile-id: {}\nfile-key: {}\n", file_id, file_key);
-    write_frame(&mut stream, request.as_bytes()).await;
+    let header = DownloadHeader {
+        file_id: file_id.to_string(),
+        file_key: file_key.to_string(),
+    };
+    let request_bytes = Command::Download(header).serialize().unwrap();
+
+    write_frame(&mut stream, &request_bytes).await;
     stream.flush().await.unwrap();
 
     let hdr_bytes = read_frame(&mut stream).await;
-    let headers = String::from_utf8_lossy(&hdr_bytes);
-    assert!(
-        !headers.starts_with("ERROR"),
-        "v1 download failed: {}",
-        headers
-    );
+    match hdr_bytes.first().copied() {
+        Some(1) => {}
+        Some(2) => {
+            let err = ErrorHeader::deserialize(&hdr_bytes[1..]).unwrap();
+            panic!("v1 download failed: {} - {}", err.code, err.message);
+        }
+        Some(other) => panic!("v1 download failed: unexpected response tag {}", other),
+        None => panic!("v1 download failed: empty response frame"),
+    }
 
-    let file_size: u64 = headers
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("file-size: ")
-                .and_then(|v| v.trim().parse().ok())
-        })
-        .expect("No file-size in v1 download response");
+    let response = DownloadResponse::deserialize(&hdr_bytes[1..]).unwrap();
 
-    let file_hash: String = headers
-        .lines()
-        .find_map(|l| l.strip_prefix("file-hash: ").map(|s| s.trim().to_string()))
-        .expect("No file-hash in v1 download response");
+    let file_size = response.file_size;
+    let file_hash = response.file_hash;
 
     let mut received = Vec::with_capacity(file_size as usize);
     let mut chunk = vec![0u8; 32 * 1024];
@@ -292,46 +193,54 @@ async fn v1_client_download(port: u16, file_id: &str, file_key: &str) -> Vec<u8>
     received
 }
 
-async fn snapshot_tracker() -> (usize, f64) {
+async fn snapshot_tracker() -> (usize, usize, f64) {
     let lock = SERVER_TRACKER.read().await;
-    (lock.total_connections, lock.total_bandwidth_gb)
+    (
+        lock.total_uploaded,
+        lock.total_download,
+        lock.total_bandwidth_gb,
+    )
 }
 
 async fn wait_for_tracker_metrics(
-    base_conns: usize,
+    base_up: usize,
+    base_down: usize,
     base_bw: f64,
-    expected_conn_delta: usize,
+    expected_up_delta: usize,
+    expected_down_delta: usize,
     expected_bw_delta: f64,
-    exact_connections: bool,
     protocol_name: &str,
 ) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
 
     loop {
-        let (connections, bandwidth) = snapshot_tracker().await;
-        let conn_delta = connections.saturating_sub(base_conns);
+        let (uploaded, downloaded, bandwidth) = snapshot_tracker().await;
+        let up_delta = uploaded.saturating_sub(base_up);
+        let down_delta = downloaded.saturating_sub(base_down);
         let bw_delta = bandwidth - base_bw;
 
-        let connections_ok = if exact_connections {
-            conn_delta == expected_conn_delta
-        } else {
-            conn_delta >= expected_conn_delta
-        };
+        let up_ok = up_delta == expected_up_delta;
+        let down_ok = down_delta == expected_down_delta;
         let bandwidth_ok = (bw_delta - expected_bw_delta).abs() < 1e-6;
 
-        if connections_ok && bandwidth_ok {
+        if up_ok && down_ok && bandwidth_ok {
             return;
         }
 
         if tokio::time::Instant::now() >= deadline {
             assert!(
-                connections_ok,
-                "{} tracker total_connections mismatch after wait: expected {}, got {}",
-                protocol_name, expected_conn_delta, conn_delta
+                up_ok,
+                "{} tracker total_uploaded mismatch: expected {}, got {}",
+                protocol_name, expected_up_delta, up_delta
+            );
+            assert!(
+                down_ok,
+                "{} tracker total_download mismatch: expected {}, got {}",
+                protocol_name, expected_down_delta, down_delta
             );
             assert!(
                 bandwidth_ok,
-                "{} tracker bandwidth mismatch after wait: expected delta {:.9} GB, got delta {:.9} GB",
+                "{} tracker bandwidth mismatch: expected delta {:.9} GB, got delta {:.9} GB",
                 protocol_name, expected_bw_delta, bw_delta
             );
         }
@@ -341,68 +250,10 @@ async fn wait_for_tracker_metrics(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn test_concurrency_v2() {
-    let _guard = share_serial_lock().lock().await;
-
-    cleanup_storage_dir().await;
-
-    let port = free_port();
-    let server = start_server_v2(port).await;
-
-    // Reset tracker after server is ready (probe connection done) to measure only client connections
-    {
-        let mut lock = SERVER_TRACKER.write().await;
-        lock.total_connections = 0;
-        lock.total_bandwidth_gb = 0.0;
-    }
-
-    let (base_conns, base_bw) = snapshot_tracker().await;
-
-    let num_clients = 32;
-    let mut tasks = JoinSet::new();
-
-    for i in 0..num_clients {
-        let mut payload = vec![0u8; GARBAGE_SIZE];
-        tasks.spawn(async move {
-            fill_random_bytes(&mut payload);
-            let filename = format!("test_file_{}.bin", i);
-            let file_key = format!("key_{}", i);
-
-            let file_id = v2_client_upload(port, &payload, &filename, &file_key).await;
-            let downloaded = v2_client_download(port, &file_id, &file_key).await;
-
-            assert_eq!(
-                payload, downloaded,
-                "Client {}: downloaded data does not match uploaded data",
-                i
-            );
-        });
-    }
-
-    while let Some(result) = tasks.join_next().await {
-        result.unwrap();
-    }
-
-    let expected_bw = num_clients as f64 * GARBAGE_SIZE as f64 / (1024.0 * 1024.0 * 1024.0);
-    wait_for_tracker_metrics(
-        base_conns,
-        base_bw,
-        2 * num_clients,
-        expected_bw,
-        true,
-        "v2",
-    )
-    .await;
-
-    stop_server(server).await;
-    cleanup_storage_dir().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrency_v1() {
-    let _guard = share_serial_lock().lock().await;
+    let _guard = share_lock().lock().await;
 
-    cleanup_storage_dir().await;
+    cleanup_storage().await;
 
     let port = free_port();
     let server = start_server_v1(port).await;
@@ -410,11 +261,12 @@ async fn test_concurrency_v1() {
     // Reset tracker after server is ready (probe connection done) to measure only client connections
     {
         let mut lock = SERVER_TRACKER.write().await;
-        lock.total_connections = 0;
+        lock.total_uploaded = 0;
+        lock.total_download = 0;
         lock.total_bandwidth_gb = 0.0;
     }
 
-    let (base_conns, base_bw) = snapshot_tracker().await;
+    let (base_up, base_down, base_bw) = snapshot_tracker().await;
 
     let num_clients = 32;
     let mut tasks = JoinSet::new();
@@ -442,18 +294,19 @@ async fn test_concurrency_v1() {
     }
 
     let expected_bw = 2.0 * num_clients as f64 * GARBAGE_SIZE as f64 / (1024.0 * 1024.0 * 1024.0);
-    // Note: v1 may sometimes report double connections due to async timing in high concurrency
-    // Check minimum expected connections but allow for extra
     wait_for_tracker_metrics(
-        base_conns,
+        base_up,
+        base_down,
         base_bw,
-        2 * num_clients,
+        num_clients, // upload increases by 1 for each
+        num_clients, // download increases by 1 for each
         expected_bw,
-        false,
         "v1",
     )
     .await;
 
     stop_server(server).await;
-    cleanup_storage_dir().await;
+    cleanup_storage().await;
 }
+
+// TODO: Protocol v2 test here when its done
