@@ -17,7 +17,7 @@ pub struct ServerArgs {
 pub enum ServerCommands {
     /// Start the server
     Serve {
-        /// Port to run the server on and server listens to 0.0.0.0::<port>
+        /// Port to run the server on and server listens to 0.0.0.0`::<port>`
         #[arg(long, default_value = "3000")]
         port: u16,
 
@@ -57,8 +57,8 @@ pub enum ClientCommands {
         #[arg(short, long)]
         file: PathBuf,
 
-        /// Address of the server to connect to (default: localhost)
-        #[arg(long, default_value = "localhost")]
+        /// Address of the server to connect to (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
         address: String,
 
         /// Port to connect to the server (default: 3000)
@@ -80,8 +80,8 @@ pub enum ClientCommands {
         #[arg(short, long)]
         dir: Option<PathBuf>,
 
-        /// Address of the server to connect to (default: localhost)
-        #[arg(long, default_value = "localhost")]
+        /// Address of the server to connect to (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
         address: String,
 
         /// Port to connect to the server (default: 3000)
@@ -103,8 +103,8 @@ pub enum ClientCommands {
 
     /// Get Status of remote server
     Status {
-        /// Address of the server to connect to (default: localhost)
-        #[arg(long, default_value = "localhost")]
+        /// Address of the server to connect to (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
         address: String,
 
         #[arg(long, default_value = "3000")]
@@ -120,8 +120,8 @@ pub enum ClientCommands {
         #[arg(short, long)]
         file: PathBuf,
 
-        /// Address of the server to connect to (default: localhost)
-        #[arg(long, default_value = "localhost")]
+        /// Address of the server to connect to (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
         address: String,
 
         /// Port to connect to the server (default: 3000)
@@ -140,8 +140,8 @@ pub enum ClientCommands {
         #[arg(short, long)]
         code: String,
 
-        /// Address of the server to connect to (default: localhost)
-        #[arg(long, default_value = "localhost")]
+        /// Address of the server to connect to (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
         address: String,
 
         /// Port to connect to the server (default: 3000)

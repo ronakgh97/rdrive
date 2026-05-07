@@ -9,6 +9,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::cmp::min;
@@ -271,12 +272,11 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     SHARED_FILE_LOCK.insert(file_id.clone(), headers.file_name.clone());
 
-    let file = File::create(&file_path).await?;
-
     // Send ACK
     timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??;
 
-    let mut buf_file = BufWriter::with_capacity(NETWORK_READ_BUFFER * 2, file);
+    let file = File::create(&file_path).await?;
+    let mut buf_file = BufWriter::with_capacity(READ_CHUNK_SIZE * 2, file);
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
@@ -295,23 +295,23 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     }
     buf_file.flush().await?;
 
-    // TODO: this check is quite redundant since, validate() handles that
-    if received != headers.file_size {
-        tokio::fs::remove_file(&file_path).await.ok();
-        SHARED_FILE_LOCK.remove(&file_id);
-        send_failed(
-            writer,
-            ErrorHeader {
-                code: 400,
-                message: format!(
-                    "File size mismatch: expected {} bytes but received {} bytes",
-                    &headers.file_size, received
-                ),
-            },
-        )
-        .await?;
-        return Ok(());
-    }
+    // // TODO: this check is quite redundant since, validate() handles that
+    // if received != headers.file_size {
+    //     tokio::fs::remove_file(&file_path).await.ok();
+    //     SHARED_FILE_LOCK.remove(&file_id);
+    //     send_failed(
+    //         writer,
+    //         ErrorHeader {
+    //             code: 400,
+    //             message: format!(
+    //                 "File size mismatch: expected {} bytes but received {} bytes",
+    //                 &headers.file_size, received
+    //             ),
+    //         },
+    //     )
+    //     .await?;
+    //     return Ok(());
+    // }
 
     let computed_hash = hex::encode(hasher.finalize());
     if computed_hash != headers.file_hash {
@@ -340,7 +340,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     };
 
     let metadata_path = storage_path.join(format!("{}.meta", file_id));
-    metadata.save_to_disk_async(&metadata_path).await?;
+    metadata.save_to_disk_async(metadata_path).await?;
 
     SHARED_FILE_LOCK.remove(&file_id);
 
@@ -449,7 +449,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??;
 
     let file = File::open(&file_path).await?;
-    let mut buf_file = BufReader::with_capacity(NETWORK_READ_BUFFER, file);
+    let mut buf_file = BufReader::with_capacity(READ_CHUNK_SIZE * 2, file);
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
     loop {
@@ -488,21 +488,21 @@ pub async fn upload_client(
         .context("Failed to read file metadata")?;
     let file_size = metadata.len();
 
+    let pg_bar = ProgressBar::new(file_size);
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true).ok();
 
-    println!("↪ Starting upload: {} ({} bytes)", file_name, file_size);
+    println!("Starting upload: {} ({} bytes)", file_name, file_size);
 
     let file_hash = file_hasher_async(&path)
         .await
         .context("Failed to compute file hash")?;
-    println!("↪ File hash: {}...", file_hash.to_string().dimmed());
+    println!("File hash: {}...", file_hash[..8].to_string().dimmed());
 
-    let progress_bar = indicatif::ProgressBar::new(file_size);
-    progress_bar.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("[{bar:60.cyan/magenta}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
-            .progress_chars("$>-"),
+    pg_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("↪ [{bar:60.blue/cyan}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+            .progress_chars("▨>-"),
     );
 
     let request = Command::Upload(UploadHeader {
@@ -541,7 +541,7 @@ pub async fn upload_client(
     }
 
     let file = File::open(&path).await.context("Failed to reopen file")?;
-    let mut buf_file = BufReader::with_capacity(READ_CHUNK_SIZE * 4, file);
+    let mut buf_file = BufReader::with_capacity(READ_CHUNK_SIZE * 2, file);
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
     loop {
@@ -556,10 +556,10 @@ pub async fn upload_client(
             .write_all(&buf[..n])
             .await
             .context("Failed to send file data")?;
-        progress_bar.inc(n as u64);
+        pg_bar.inc(n as u64);
     }
 
-    progress_bar.finish_and_clear();
+    pg_bar.finish_and_clear();
     writer.flush().await.context("Failed to flush")?;
 
     let mut len_buf = [0u8; 4];
@@ -631,15 +631,15 @@ pub async fn download_client(
     let response = DownloadResponse::deserialize(&header_bytes[1..])?;
 
     println!(
-        "↩ Downloading: {} ({} bytes)",
+        "Downloading: {} ({} bytes)",
         response.file_name, response.file_size
     );
 
-    let progress_bar = indicatif::ProgressBar::new(response.file_size);
-    progress_bar.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("[{bar:60.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
-            .progress_chars("#>-"),
+    let pg_bar = ProgressBar::new(response.file_size);
+    pg_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("↩ [{bar:60.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+            .progress_chars("▨>-"),
     );
 
     let output_path = output
@@ -647,10 +647,10 @@ pub async fn download_client(
         .join(&response.file_name);
 
     let raw_file = File::create(&output_path).await?;
-    let mut buf_file = BufWriter::with_capacity(NETWORK_READ_BUFFER * 2, raw_file);
+    let mut buf_file = BufWriter::with_capacity(READ_CHUNK_SIZE * 2, raw_file);
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
-    let mut buf = vec![0u8; READ_CHUNK_SIZE * 2];
+    let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
     while received < response.file_size {
         let to_read = min(buf.len(), (response.file_size - received) as usize);
@@ -664,11 +664,11 @@ pub async fn download_client(
         hasher.update(&buf[..n]);
         buf_file.write_all(&buf[..n]).await?;
         received += n as u64;
-        progress_bar.inc(n as u64);
+        pg_bar.inc(n as u64);
     }
 
     buf_file.flush().await?;
-    progress_bar.finish_and_clear();
+    pg_bar.finish_and_clear();
 
     let computed_hash = hex::encode(hasher.finalize());
     if computed_hash != response.file_hash {

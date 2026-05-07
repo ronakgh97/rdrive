@@ -1,8 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 use r_drive::args::{ServerArgs, ServerCommands};
+use r_drive::crypto::generate_master_key;
 use r_drive::service::serve_tcp;
-use r_drive::{MASTER_KEY, ascii_art, generate_master_key};
+use r_drive::{MASTER_KEY, ascii_art};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 24)]
 async fn main() -> Result<()> {
