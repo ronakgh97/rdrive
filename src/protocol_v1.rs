@@ -488,6 +488,10 @@ pub async fn upload_client(
         .context("Failed to read file metadata")?;
     let file_size = metadata.len();
 
+    if file_size <= 1024 {
+        anyhow::bail!("File size must be greater than 1KB");
+    }
+
     let pg_bar = ProgressBar::new(file_size);
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true).ok();

@@ -81,3 +81,25 @@ pub fn generate_master_key() -> String {
     rng.fill_bytes(&mut key);
     hex::encode(key)
 }
+
+#[test]
+fn crypto_test() {
+    let mut key = [0u8; 32];
+    rand::rng().fill_bytes(&mut key);
+    let mut data = vec![0u8; 64 * 1024 * 1024];
+    rand::rng().fill_bytes(&mut data);
+
+    let encrypted = encrypt_data(&data, &key);
+    assert_eq!(encrypted.len(), data.len() + 12);
+
+    let decrypted = decrypt_data(&encrypted, &key);
+    assert_eq!(decrypted, data);
+
+    let data: &[u8] = b"";
+
+    let encrypted = encrypt_data(data, &key);
+    assert_eq!(encrypted.len(), 12);
+
+    let decrypted = decrypt_data(&encrypted, &key);
+    assert!(decrypted.is_empty());
+}

@@ -3,7 +3,6 @@ use anyhow::Result;
 use colored::Colorize;
 use dashmap::DashMap;
 use hex::decode;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
@@ -17,6 +16,7 @@ use tokio::sync::RwLock;
 pub mod args;
 pub mod crypto;
 pub mod header;
+pub mod layer;
 pub mod log;
 pub mod protocol_v1;
 pub mod protocol_v2;
@@ -141,32 +141,6 @@ pub static MAX_FILE_SIZE: LazyLock<u64> = LazyLock::new(|| {
         .unwrap_or(8 * 1024 * 1024 * 1024) // 8 GB default
 });
 
-pub static SERVER_TRACKER: LazyLock<Arc<RwLock<Tracker>>> =
-    LazyLock::new(|| Arc::new(RwLock::new(Tracker::default())));
-
-/// Get the server uptime in hours
-#[inline]
-pub fn try_get_uptime_hrs() -> f64 {
-    if let Some(start_time) = START_TIME.get() {
-        let now = chrono::Local::now();
-        let duration = now.signed_duration_since(*start_time);
-        duration.num_hours() as f64
-    } else {
-        0.0
-    }
-}
-
-#[inline]
-pub fn try_get_master_key() -> Option<String> {
-    MASTER_KEY.get().cloned()
-}
-
-#[inline(always)]
-pub fn fill_random_bytes(buf: &mut [u8]) {
-    let mut rng = rand::rng();
-    rng.fill_bytes(buf);
-}
-
 pub const NETWORK_READ_BUFFER: usize = 4 * 1024 * 1024;
 pub const NETWORK_WRITE_BUFFER: usize = 8 * 1024 * 1024;
 pub const READ_CHUNK_SIZE: usize = 64 * 1024;
@@ -175,6 +149,9 @@ pub const WRITE_CHUNK_SIZE: usize = 96 * 1024;
 // For Header only
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub static SERVER_TRACKER: LazyLock<Arc<RwLock<Tracker>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(Tracker::default())));
 
 #[derive(Clone)]
 pub struct Tracker {
@@ -193,26 +170,21 @@ impl Default for Tracker {
     }
 }
 
-#[test]
-fn encrypt_decrypt_test() {
-    let mut key = [0u8; 32];
-    fill_random_bytes(&mut key);
-    let mut data = [0u8; 4096 * 64];
-    fill_random_bytes(&mut data);
+/// Get the server uptime in hours
+#[inline]
+pub fn try_get_uptime_hrs() -> f64 {
+    if let Some(start_time) = START_TIME.get() {
+        let now = chrono::Local::now();
+        let duration = now.signed_duration_since(*start_time);
+        duration.num_hours() as f64
+    } else {
+        0.0
+    }
+}
 
-    let encrypted = encrypt_data(&data, &key);
-    assert_eq!(encrypted.len(), data.len() + 12);
-
-    let decrypted = decrypt_data(&encrypted, &key);
-    assert_eq!(decrypted, data);
-
-    let data: &[u8] = b"";
-
-    let encrypted = encrypt_data(data, &key);
-    assert_eq!(encrypted.len(), 12);
-
-    let decrypted = decrypt_data(&encrypted, &key);
-    assert!(decrypted.is_empty());
+#[inline]
+pub fn try_get_master_key() -> Option<String> {
+    MASTER_KEY.get().cloned()
 }
 
 pub fn ascii_art() {

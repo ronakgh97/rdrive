@@ -1,7 +1,8 @@
 use r_drive::header::{
     Command, DownloadHeader, DownloadResponse, ErrorHeader, UploadHeader, UploadResponse,
 };
-use r_drive::{SERVER_TRACKER, fill_random_bytes, get_storage_path};
+use r_drive::{SERVER_TRACKER, get_storage_path};
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::io::ErrorKind;
 use std::net::TcpListener;
@@ -274,7 +275,7 @@ async fn test_concurrency_v1() {
     for i in 0..num_clients {
         let mut payload = vec![0u8; GARBAGE_SIZE];
         tasks.spawn(async move {
-            fill_random_bytes(&mut payload);
+            rand::rng().fill_bytes(&mut payload);
             let filename = format!("v1_test_file_{}.bin", i);
             let file_key = format!("v1_key_{}", i);
 

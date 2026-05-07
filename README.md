@@ -25,6 +25,27 @@ Enter file key: ronak
 Saved to: .\dummy.bin
 ```
 
+layering/CAS (WIP)
+```shell
+running 1 test
+hash of old layers:
+Layer 0: hash=d30cb8c6e507680f667757850464aa41df951d3db917cd849c53098d205eade8, offset=0, size=67108864
+Layer 1: hash=7c3c8ffc3a009485d796b2958ca5518a1aea848f009a66afb51c7aabf46f2fb5, offset=67108864, size=67108864
+Layer 2: hash=00f3ebdf08b2c200e25b2cf2ea10f7eff9a3cc69986b5a2795de234efbbe9fb7, offset=134217728, size=67108864
+Layer 3: hash=16b484824dbd5e232acc48c5225714ebe991a00524763ddc24e0463dccb3cec9, offset=201326592, size=67108864
+hash of new layers:
+Layer 0: hash=abbf42262a83cfc231444dae845d186df367f89ba736eab2eb3dee3de7cc3585, offset=0, size=67108864
+Layer 1: hash=fa6735573375624fa6b197847c647ea68028d7a17121fa5b4c11d9edaab48a98, offset=67108864, size=67108864
+Layer 2: hash=d6d958e0d0b247225fc7db068163bcabc841738267d4b1fc66e940646bf7718e, offset=134217728, size=67108864
+Layer 3: hash=44bd5c864d8788b797ecd2f81d6ee3f52bed6c9a9353cc6915ec8b3c355f16c6, offset=201326592, size=67108864
+Changed layers:
+Layer 0: hash=d30cb8c6e507680f667757850464aa41df951d3db917cd849c53098d205eade8, offset=0, size=67108864
+Layer 1: hash=7c3c8ffc3a009485d796b2958ca5518a1aea848f009a66afb51c7aabf46f2fb5, offset=67108864, size=67108864
+Layer 2: hash=00f3ebdf08b2c200e25b2cf2ea10f7eff9a3cc69986b5a2795de234efbbe9fb7, offset=134217728, size=67108864
+Layer 3: hash=16b484824dbd5e232acc48c5225714ebe991a00524763ddc24e0463dccb3cec9, offset=201326592, size=67108864
+test layer::experimental_layer_test ... ok
+```
+
 TODO
 
 - Better Encryption for storage and metadata
@@ -46,9 +67,10 @@ TODO
 - Too many repetitive code, need to refactor and clean up the codebase
 - Still some buffering issues, data gets stalls, does not flush properly
 - Multi-port support for better concurrency
-- rsync support (rolling hashing, delta transfers, etc.)
+- rsync support (rolling hashing, delta transfers, etc.) CDC `LAYERING like docker`
 - Serialized headers, rm fragile parsing
 - Add proper user-space (multiple users)
+- DO some CAS magic for better storage efficiency and deduplication
 
 ISSUE
 
