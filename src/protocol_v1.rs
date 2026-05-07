@@ -11,10 +11,12 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::cmp::min;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -101,7 +103,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
 
             match header.validate() {
                 Ok(_) => {
-                    handle_upload(&mut reader, &mut writer, &header, start_time, storage_path)
+                    handle_upload(&mut reader, &mut writer, header, start_time, storage_path)
                         .await?;
                 }
                 Err(e) => {
@@ -124,7 +126,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
 
             match header.validate() {
                 Ok(_) => {
-                    handle_download(&mut reader, &mut writer, &header, start_time, storage_path)
+                    handle_download(&mut reader, &mut writer, header, start_time, storage_path)
                         .await?;
                 }
                 Err(e) => {
@@ -175,7 +177,7 @@ async fn read_headers<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Command
     Ok(command)
 }
 
-// Write a frame with 2-byte length prefix, return error on write failure
+// Write a frame with 4-byte length prefix, return error on write failure
 #[inline(always)]
 pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> Result<()> {
     let len = data.len();
@@ -189,17 +191,16 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) 
     Ok(())
 }
 
-// Send an error response with code and message, then close the connection
+// Send a generic serialized success response with code and message, then close the connection
 #[inline]
 async fn send_success<W: AsyncWriteExt + Unpin, T: Serialize>(
     writer: &mut W,
     response: &T,
 ) -> Result<()> {
-    let payload_bytes = postcard::to_allocvec(response)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
-    let mut rsp = Vec::with_capacity(1 + payload_bytes.len());
+    let mut rsp = Vec::with_capacity(1 + 96);
     rsp.push(1u8); // 1 = success
-    rsp.extend(payload_bytes);
+    postcard::to_io(response, &mut rsp)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize success response: {}", e))?;
     timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??;
     writer.shutdown().await?; // Close connection after response
     Ok(())
@@ -254,11 +255,11 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
 async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
     writer: &mut W,
-    headers: &UploadHeader,
+    headers: UploadHeader,
     time_start: Instant,
     storage_path: &Path,
 ) -> Result<()> {
-    let file_id = Uuid::new_v4().to_string().replace("-", "_");
+    let file_id = Uuid::new_v4().simple().to_string();
     let file_path = storage_path.join(&file_id);
 
     info!(
@@ -270,7 +271,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     SHARED_FILE_LOCK.insert(file_id.clone(), headers.file_name.clone());
 
-    let file = tokio::fs::File::create(&file_path).await?;
+    let file = File::create(&file_path).await?;
 
     // Send ACK
     timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??;
@@ -282,7 +283,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     {
         while received < headers.file_size {
-            let to_read = std::cmp::min(buf.len(), (headers.file_size - received) as usize);
+            let to_read = min(buf.len(), (headers.file_size - received) as usize);
             let n = reader.read(&mut buf[..to_read]).await?;
             if n == 0 {
                 break;
@@ -332,10 +333,10 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     }
 
     let metadata = Metadata {
-        filename: headers.file_name.clone(),
+        filename: headers.file_name,
         file_size: headers.file_size,
-        file_hash: headers.file_hash.clone(),
-        file_key: headers.file_key.clone(),
+        file_hash: headers.file_hash,
+        file_key: headers.file_key,
     };
 
     let metadata_path = storage_path.join(format!("{}.meta", file_id));
@@ -363,7 +364,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     _reader: &mut R,
     writer: &mut W,
-    headers: &DownloadHeader,
+    headers: DownloadHeader,
     _start_time: Instant,
     storage_path: &Path,
 ) -> Result<()> {
@@ -438,7 +439,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         file_name,
         file_size,
         file_hash,
-        file_key: headers.file_key.clone(),
+        file_key: headers.file_key,
     }
     .serialize()?;
 
@@ -447,7 +448,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     rsp.extend(header);
     timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??;
 
-    let file = tokio::fs::File::open(&file_path).await?;
+    let file = File::open(&file_path).await?;
     let mut buf_file = BufReader::with_capacity(NETWORK_READ_BUFFER, file);
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
@@ -539,9 +540,7 @@ pub async fn upload_client(
         anyhow::bail!("Upload failed: {} - {}", err.code, err.message);
     }
 
-    let file = tokio::fs::File::open(&path)
-        .await
-        .context("Failed to reopen file")?;
+    let file = File::open(&path).await.context("Failed to reopen file")?;
     let mut buf_file = BufReader::with_capacity(READ_CHUNK_SIZE * 4, file);
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
@@ -600,11 +599,7 @@ pub async fn download_client(
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true).ok();
 
-    let request = Command::Download(DownloadHeader {
-        file_id: file_id.clone(),
-        file_key: file_key.clone(),
-    })
-    .serialize()?;
+    let request = Command::Download(DownloadHeader { file_id, file_key }).serialize()?;
 
     let (reader, writer) = stream.split();
     let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
@@ -651,14 +646,14 @@ pub async fn download_client(
         .unwrap_or_else(|| PathBuf::from("."))
         .join(&response.file_name);
 
-    let raw_file = tokio::fs::File::create(&output_path).await?;
+    let raw_file = File::create(&output_path).await?;
     let mut buf_file = BufWriter::with_capacity(NETWORK_READ_BUFFER * 2, raw_file);
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
     let mut buf = vec![0u8; READ_CHUNK_SIZE * 2];
 
     while received < response.file_size {
-        let to_read = std::cmp::min(buf.len(), (response.file_size - received) as usize);
+        let to_read = min(buf.len(), (response.file_size - received) as usize);
         let n = reader
             .read(&mut buf[..to_read])
             .await
@@ -691,16 +686,19 @@ pub async fn download_client(
     Ok(output_path)
 }
 
-pub async fn get_status_v1(host: &str, port: u16) -> Result<StatusHeader> {
+pub async fn get_server_status(host: &str, port: u16) -> Result<StatusHeader> {
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    stream.set_nodelay(true).ok();
 
     let request = Command::Status.serialize()?;
 
-    let (mut reader, mut writer) = stream.split();
-
+    let (reader, writer) = stream.split();
+    let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
+    let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
     let len = (request.len() as u32).to_be_bytes();
     writer.write_all(&len).await?;
     writer.write_all(&request).await?;
+    writer.flush().await.context("Failed to flush request")?;
 
     let mut len_buf = [0u8; 4];
     reader

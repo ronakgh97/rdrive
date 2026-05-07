@@ -1,4 +1,4 @@
-Tweaking with TCP UDP QDP while building AWS s3 because I'm bored
+Tweaking with Network Protocol while building AWS s3 because I'm sad boy
 
 Use docker [Image](https://hub.docker.com/repository/docker/ronakgh97/rdrive/general)
 
@@ -7,7 +7,7 @@ docker pull ronakgh97/rdrive:latest (<60 mb)
 docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name rdrive ronakgh97/rdrive:latest
 ```
 
-Then you can use the CLI to push/pull files
+then you can use the CLI to push/pull files
 
 ```shell
 rdrive push --file dummy.bin --port 3000 --protocol v1       
@@ -18,8 +18,7 @@ File ID: 2e8e2c5e-9f36-4369-802f-81d6b7fc0e69 - Time took: 3.350482605
 ````
 
 ```shell
-rdrive pull --output . --port 3000 --protocol v1      
-File already exists. Do you want to overwrite it? (y/n): y
+rdrive pull --port 3000 --protocol v1
 Enter file ID: 2e8e2c5e-9f36-4369-802f-81d6b7fc0e69
 Enter file key: ronak
 ↩ Downloading: dummy.bin (1180000000 bytes)

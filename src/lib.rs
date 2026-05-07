@@ -1,6 +1,7 @@
 use aes::Aes256;
 use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
 use anyhow::Result;
+use colored::Colorize;
 use dashmap::DashMap;
 use hex::decode;
 use rand::{Rng, RngExt};
@@ -294,7 +295,7 @@ impl Default for Tracker {
 }
 
 #[test]
-fn encrypt_decrypt_round_trip() {
+fn encrypt_decrypt_test() {
     let mut key = [0u8; 32];
     fill_random_bytes(&mut key);
     let mut data = [0u8; 4096 * 64];
@@ -305,12 +306,7 @@ fn encrypt_decrypt_round_trip() {
 
     let decrypted = decrypt_data(&encrypted, &key);
     assert_eq!(decrypted, data);
-}
 
-#[test]
-fn encrypt_decrypt_empty_payload() {
-    let mut key = [0u8; 32];
-    fill_random_bytes(&mut key);
     let data: &[u8] = b"";
 
     let encrypted = encrypt_data(data, &key);
@@ -318,4 +314,29 @@ fn encrypt_decrypt_empty_payload() {
 
     let decrypted = decrypt_data(&encrypted, &key);
     assert!(decrypted.is_empty());
+}
+
+pub fn ascii_art() {
+    let ascii = r"
+               ▄▄
+               ██       ▀▀
+████▄       ▄████ ████▄ ██ ██ ██ ▄█▀█▄
+██ ▀▀ ▀▀▀▀▀ ██ ██ ██ ▀▀ ██ ██▄██ ██▄█▀
+██          ▀████ ██    ██▄ ▀█▀  ▀█▄▄▄
+
+    ";
+
+    println!(
+        "{}",
+        "rdrive; an object storage server written in Rust"
+            .bright_blue()
+            .bold()
+    );
+
+    println!("{}", ascii.blue());
+
+    println!(
+        "🔗 Github: {}",
+        "https://github.com/ronakgh97/rstorage".magenta().bold()
+    );
 }

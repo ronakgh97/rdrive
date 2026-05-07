@@ -3,9 +3,9 @@ use clap::Parser;
 use colored::Colorize;
 use r_drive::args::{ClientArgs, ClientCommands};
 use r_drive::protocol_v1::{
-    download_client as download_file_v1, get_status_v1, upload_client as upload_file_v1,
+    download_client as download_file_v1, get_server_status, upload_client as upload_file_v1,
 };
-use r_drive::{Catalog, get_catalog_path};
+use r_drive::{Catalog, ascii_art, get_catalog_path};
 use std::io;
 
 #[tokio::main]
@@ -15,6 +15,7 @@ async fn main() -> Result<()> {
     match args.command {
         Some(ClientCommands::Push {
             file,
+            address,
             port,
             protocol,
             file_key,
@@ -39,7 +40,7 @@ async fn main() -> Result<()> {
             };
 
             let key = match protocol.as_str() {
-                "v1" => upload_file_v1(file.clone(), file_key, "127.0.0.1", port).await?,
+                "v1" => upload_file_v1(file.clone(), file_key, &address, port).await?,
                 "v2" => todo!("UDP protocol is WIP"),
                 _ => {
                     eprintln!("Unknown protocol: {}", protocol);
@@ -68,6 +69,7 @@ async fn main() -> Result<()> {
         }
         Some(ClientCommands::Pull {
             dir,
+            address,
             port,
             protocol,
             file_key,
@@ -104,7 +106,7 @@ async fn main() -> Result<()> {
 
             match protocol.as_str() {
                 "v1" => {
-                    download_file_v1(file_id, file_key, dir, "127.0.0.1", port).await?;
+                    download_file_v1(file_id, file_key, dir, &address, port).await?;
                 }
                 "v2" => {
                     todo!("UDP protocol is WIP")
@@ -116,17 +118,21 @@ async fn main() -> Result<()> {
             }
         }
         Some(ClientCommands::Serve { .. }) => {
-            todo!()
+            todo!("Non-trivial to implement this feature")
         }
         Some(ClientCommands::Listen { .. }) => {
-            todo!()
+            todo!("Non-trivial to implement this feature")
         }
         Some(ClientCommands::Ls { .. }) => {
             list_file_map().await?;
         }
-        Some(ClientCommands::Status { port, protocol }) => match protocol.as_str() {
+        Some(ClientCommands::Status {
+            port,
+            address,
+            protocol,
+        }) => match protocol.as_str() {
             "v1" => {
-                let status = get_status_v1("localhost", port).await?;
+                let status = get_server_status(&address, port).await?;
 
                 println!("Status timestamp: {}", status.timestamp);
                 println!("Uptime: {} hrs", status.uptime_hrs);
@@ -144,31 +150,15 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         },
+        Some(ClientCommands::User { .. }) => {
+            todo!("WIP: Multi user space is not implemented yet")
+        }
         None => {
             ascii_art();
         }
     }
 
     Ok(())
-}
-
-#[inline]
-fn ascii_art() {
-    let ascii = r"                                       
-               ▄▄                      
-               ██       ▀▀             
-████▄       ▄████ ████▄ ██ ██ ██ ▄█▀█▄ 
-██ ▀▀ ▀▀▀▀▀ ██ ██ ██ ▀▀ ██ ██▄██ ██▄█▀ 
-██          ▀████ ██    ██▄ ▀█▀  ▀█▄▄▄ 
-
-    ";
-
-    println!("{}", ascii.cyan());
-
-    println!(
-        "🔗 Github: {}",
-        "https://github.com/ronakgh97/rstorage".magenta().bold()
-    );
 }
 
 async fn list_file_map() -> Result<()> {

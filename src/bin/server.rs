@@ -1,9 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use colored::Colorize;
 use r_drive::args::{ServerArgs, ServerCommands};
 use r_drive::service::serve_tcp;
-use r_drive::{MASTER_KEY, generate_master_key};
+use r_drive::{MASTER_KEY, ascii_art, generate_master_key};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 24)]
 async fn main() -> Result<()> {
@@ -31,23 +30,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-#[inline]
-fn ascii_art() {
-    let ascii = r"
-               ▄▄
-               ██       ▀▀
-████▄       ▄████ ████▄ ██ ██ ██ ▄█▀█▄
-██ ▀▀ ▀▀▀▀▀ ██ ██ ██ ▀▀ ██ ██▄██ ██▄█▀
-██          ▀████ ██    ██▄ ▀█▀  ▀█▄▄▄
-
-    ";
-
-    println!("{}", ascii.bright_blue());
-
-    println!(
-        "🔗 Github: {}",
-        "https://github.com/ronakgh97/rstorage".magenta().bold()
-    );
 }

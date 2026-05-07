@@ -5,8 +5,8 @@ use std::path::PathBuf;
 #[command(
     name = "r-drive",
     version = "1.0.0-gamma",
-    about = "R-drive: a super ultra blazingly fast file-storage and sharing with very simple protocol",
-    long_about = ""
+    about = "r-drive; a super simple file storage and sharing with simple & secure protocol",
+    long_about = "r-drive; a super simple file storage and sharing with simple & secure protocol"
 )]
 pub struct ServerArgs {
     #[command(subcommand)]
@@ -17,7 +17,7 @@ pub struct ServerArgs {
 pub enum ServerCommands {
     /// Start the server
     Serve {
-        /// Port to run the server on
+        /// Port to run the server on and server listens to 0.0.0.0::<port>
         #[arg(long, default_value = "3000")]
         port: u16,
 
@@ -31,8 +31,8 @@ pub enum ServerCommands {
 #[command(
     name = "r-drive-cli",
     version = "1.0.0-gamma",
-    about = "R-drive: a super smol and minimal cli client wrapper for interacting with the r-storage server",
-    long_about = ""
+    about = "r-drive; a minimal client wrapper for interacting with the r-drive server",
+    long_about = "r-drive; a minimal client wrapper for interacting with the r-drive server"
 )]
 pub struct ClientArgs {
     #[command(subcommand)]
@@ -41,11 +41,25 @@ pub struct ClientArgs {
 
 #[derive(Subcommand)]
 pub enum ClientCommands {
+    /// User-specific operations, such as authentication, file management, etc.
+    User {
+        /// Create a new user space
+        #[arg(short, long)]
+        add: String,
+        /// Remove a user space
+        #[arg(short, long)]
+        remove: String,
+    },
+
     /// Upload a file to the server
     Push {
         /// Path to the file to upload
         #[arg(short, long)]
         file: PathBuf,
+
+        /// Address of the server to connect to (default: localhost)
+        #[arg(long, default_value = "localhost")]
+        address: String,
 
         /// Port to connect to the server (default: 3000)
         #[arg(long, default_value = "3000")]
@@ -66,6 +80,10 @@ pub enum ClientCommands {
         #[arg(short, long)]
         dir: Option<PathBuf>,
 
+        /// Address of the server to connect to (default: localhost)
+        #[arg(long, default_value = "localhost")]
+        address: String,
+
         /// Port to connect to the server (default: 3000)
         #[arg(long, default_value = "3000")]
         port: u16,
@@ -85,6 +103,10 @@ pub enum ClientCommands {
 
     /// Get Status of remote server
     Status {
+        /// Address of the server to connect to (default: localhost)
+        #[arg(long, default_value = "localhost")]
+        address: String,
+
         #[arg(long, default_value = "3000")]
         port: u16,
 
@@ -97,6 +119,10 @@ pub enum ClientCommands {
         /// Path to the file to send over
         #[arg(short, long)]
         file: PathBuf,
+
+        /// Address of the server to connect to (default: localhost)
+        #[arg(long, default_value = "localhost")]
+        address: String,
 
         /// Port to connect to the server (default: 3000)
         #[arg(short, long)]
@@ -113,6 +139,10 @@ pub enum ClientCommands {
         /// Secure code
         #[arg(short, long)]
         code: String,
+
+        /// Address of the server to connect to (default: localhost)
+        #[arg(long, default_value = "localhost")]
+        address: String,
 
         /// Port to connect to the server (default: 3000)
         #[arg(short, long)]
