@@ -2,9 +2,8 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::io::{BufReader, SeekFrom};
-
 // TODO: EXPERIMENT, WILL CHANGE LATER,
 //  Protocol design need a change to implement this, we need CAS (Content Addressable Storage) to make this work,
 //  which means we need to store the layers in a separate file and use hash as the filename,
@@ -26,50 +25,130 @@ const LAYER_SIZE: usize = 1024 * 1024 * 64;
 
 pub struct Layer {
     pub data: Vec<u8>,
+    pub layer_meta: LayerMeta,
+}
+
+pub struct LayerMeta {
     pub hash: String,
     pub mem_offset: usize,
 }
 
-/// Reads a file in chunks of `LAYER_SIZE`, creates layers with their hash and offset
-/// EXPERIMENT: this is bad, since its layer file into vec memory
-pub async fn to_layers(mut buf_file: BufReader<File>) -> Result<Vec<Layer>> {
-    let mut layers: Vec<Layer> = Vec::new();
-    let mut layer_buffer = vec![0u8; LAYER_SIZE];
-    let mut mem_idx = 0usize;
+/// Reads a file in chunks of `LAYER_SIZE`, creates layer metadata and does NOT store the actual data in memory
+pub async fn read_file_layers(mut buf_reader: BufReader<File>) -> Result<Vec<LayerMeta>> {
+    let mut layers_meta = Vec::with_capacity(8);
+    let mut mem_offset = 0usize;
 
     loop {
-        // read up to layer_size, partially filled buffer is expected for last layer or small file
-        let mut read_ptr = 0usize;
-        while read_ptr < layer_buffer.len() {
-            let n = buf_file
-                .read(&mut layer_buffer[read_ptr..])
-                .await
-                .context("Failed to read chunk")?;
+        let mut buffer = vec![0u8; LAYER_SIZE];
+        let mut hasher = Sha256::new();
+        let mut read_idx = 0;
+
+        while read_idx < LAYER_SIZE {
+            let n = buf_reader.read(&mut buffer[read_idx..]).await?;
+
             if n == 0 {
                 break;
             }
-            read_ptr += n;
+
+            hasher.update(&buffer[read_idx..read_idx + n]);
+            read_idx += n;
         }
 
-        if read_ptr == 0 {
-            break; // EOF
+        if read_idx == 0 {
+            break;
         }
 
-        let layer_data = layer_buffer[..read_ptr].to_vec();
-        let mut hasher = Sha256::new();
-        hasher.update(&layer_data);
-        let layer_hash = hex::encode(hasher.finalize());
-
-        layers.push(Layer {
-            data: layer_data,
-            hash: layer_hash,
-            mem_offset: mem_idx,
+        layers_meta.push(LayerMeta {
+            hash: hex::encode(hasher.finalize()),
+            mem_offset,
         });
 
-        mem_idx += read_ptr;
+        mem_offset += read_idx;
     }
 
-    layers.sort_by_key(|layer| layer.mem_offset);
+    Ok(layers_meta)
+}
+
+/// Reads a file in chunks of `LAYER_SIZE` at `mem_offset`, and returns a layer
+/// returns None if the offset is beyond EOF, otherwise returns the layer with file data and metadata
+pub async fn read_data_layer(
+    mut buf_reader: BufReader<File>,
+    mem_offset: usize,
+) -> Result<Option<Layer>> {
+    let mut buffer = vec![0u8; LAYER_SIZE];
+
+    buf_reader.seek(SeekFrom::Start(mem_offset as u64)).await?;
+
+    let mut read_ptr = 0;
+    let mut hasher = Sha256::new();
+
+    while read_ptr < LAYER_SIZE {
+        let n = buf_reader.read(&mut buffer[read_ptr..]).await?;
+
+        if n == 0 {
+            break;
+        }
+
+        hasher.update(&buffer[read_ptr..read_ptr + n]);
+        read_ptr += n;
+    }
+
+    // offset beyond EOF
+    if read_ptr == 0 {
+        return Ok(None);
+    }
+
+    buffer.truncate(read_ptr);
+
+    Ok(Some(Layer {
+        data: buffer,
+        layer_meta: LayerMeta {
+            hash: hex::encode(hasher.finalize()),
+            mem_offset,
+        },
+    }))
+}
+
+/// Reads a file in chunks of `LAYER_SIZE`, creates layers with their hash and offset
+/// EXPERIMENT: only for testing, not used in protocol, because we don't want to store the actual data in memory
+pub async fn to_layers(mut buf_reader: BufReader<File>) -> Result<Vec<Layer>> {
+    let mut layers = Vec::new();
+    let mut mem_offset = 0;
+
+    loop {
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; LAYER_SIZE];
+        let mut bytes_read = 0;
+
+        while bytes_read < LAYER_SIZE {
+            let n = buf_reader
+                .read(&mut buffer[bytes_read..])
+                .await
+                .context("failed to read chunk")?;
+
+            if n == 0 {
+                break;
+            }
+
+            hasher.update(&buffer[bytes_read..bytes_read + n]);
+            bytes_read += n;
+        }
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        buffer.truncate(bytes_read); // truncate if new layer is smaller than LAYER_SIZE
+        layers.push(Layer {
+            data: buffer,
+            layer_meta: LayerMeta {
+                hash: hex::encode(hasher.finalize()),
+                mem_offset,
+            },
+        });
+
+        mem_offset += bytes_read;
+    }
 
     Ok(layers)
 }
@@ -85,17 +164,16 @@ pub async fn from_layers(layers: &mut [Layer], write_path: &Path) -> Result<()> 
         .await
         .context("Failed to create output file")?;
 
-    let mut writer = tokio::io::BufWriter::with_capacity(LAYER_SIZE * 2, file);
+    let mut writer = BufWriter::with_capacity(LAYER_SIZE * 2, file);
 
-    layers.sort_by_key(|layer| layer.mem_offset);
-
+    // already sorted, we can ignore mem_offset while writing
+    layers.sort_by_key(|layer| layer.layer_meta.mem_offset);
     for layer in layers.iter() {
-        // flush any pending buffered data before seeking the underlying file
-        writer.flush().await?;
-        writer
-            .get_mut()
-            .seek(SeekFrom::Start(layer.mem_offset as u64))
-            .await?;
+        // writer.flush().await?;
+        // writer
+        //     .get_mut()
+        //     .seek(SeekFrom::Start(layer.layer_meta.mem_offset as u64))
+        //     .await?;
         writer.write_all(&layer.data).await?;
     }
 
@@ -115,7 +193,8 @@ pub fn compare_layers(src: Vec<Layer>, des: &[Layer]) -> Result<Vec<Layer>> {
     for src_layer in src {
         // Look for a layer in `des` that matches the exact offset AND hash
         let is_changed = des.iter().any(|des_layer| {
-            des_layer.mem_offset == src_layer.mem_offset && des_layer.hash == src_layer.hash
+            des_layer.layer_meta.mem_offset == src_layer.layer_meta.mem_offset
+                && des_layer.layer_meta.hash == src_layer.layer_meta.hash
         });
 
         // If the server doesn't have it, we need to upload it!
@@ -129,6 +208,7 @@ pub fn compare_layers(src: Vec<Layer>, des: &[Layer]) -> Result<Vec<Layer>> {
 
 #[tokio::test]
 async fn experimental_layer_test() {
+    use crate::file_hasher_async;
     use rand::Rng;
     let mut rng = rand::rng();
     let mut file_data = vec![0u8; 256 * 1024 * 1024];
@@ -136,15 +216,17 @@ async fn experimental_layer_test() {
     tokio::fs::write("old.bin", &file_data).await.unwrap();
 
     let buf_file = BufReader::new(File::open("old.bin").await.unwrap());
-    let old_layers = to_layers(buf_file).await.unwrap();
+    let old_hash = file_hasher_async("old.bin".as_ref()).await.unwrap();
+    println!("hash of old file: {}", old_hash);
+    let mut old_layers = to_layers(buf_file).await.unwrap();
 
     println!("hash of old layers:");
     for (i, layer) in old_layers.iter().enumerate() {
         println!(
             "Layer {}: hash={}, offset={}, size={}",
             i,
-            layer.hash,
-            layer.mem_offset,
+            layer.layer_meta.hash,
+            layer.layer_meta.mem_offset,
             layer.data.len()
         );
     }
@@ -158,6 +240,19 @@ async fn experimental_layer_test() {
         file_data.len()
     );
 
+    //from_layer test
+    from_layers(&mut old_layers, "reconstructed.bin".as_ref())
+        .await
+        .unwrap();
+    let reconstructed_hash = file_hasher_async("reconstructed.bin".as_ref())
+        .await
+        .unwrap();
+    println!("hash of reconstructed file: {}", reconstructed_hash);
+    assert_eq!(old_hash, reconstructed_hash);
+
+    tokio::fs::remove_file("reconstructed.bin").await.unwrap();
+
+    // randomize again
     rng.fill_bytes(&mut file_data);
     tokio::fs::write("new.bin", &file_data).await.unwrap();
     let buf_file = BufReader::new(File::open("new.bin").await.unwrap());
@@ -168,8 +263,8 @@ async fn experimental_layer_test() {
         println!(
             "Layer {}: hash={}, offset={}, size={}",
             i,
-            layer.hash,
-            layer.mem_offset,
+            layer.layer_meta.hash,
+            layer.layer_meta.mem_offset,
             layer.data.len()
         );
     }
@@ -181,8 +276,8 @@ async fn experimental_layer_test() {
         println!(
             "Layer {}: hash={}, offset={}, size={}",
             i,
-            layer.hash,
-            layer.mem_offset,
+            layer.layer_meta.hash,
+            layer.layer_meta.mem_offset,
             layer.data.len()
         );
     }
