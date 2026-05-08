@@ -25,7 +25,11 @@ Enter file key: ronak
 Saved to: .\dummy.bin
 ```
 
+> Create MASTER KEY, beforehand otherwise when server restarts, your file will have no way to decrypt,
+> since server generates KEY on-the-fly
+
 layering/CAS (WIP)
+
 ```shell
 running 1 test
 hash of old layers:
@@ -48,9 +52,9 @@ test layer::experimental_layer_test ... ok
 
 TODO
 
-- Better Encryption for storage and metadata
-- Better Bandwidth tracking and limits
-- Better Error handling and logging
+- Better Encryption for storage and metadata 
+- Better Bandwidth tracking and limits [DONE]
+- Better Error handling and logging [DONE]
 - Thread pool for better concurrency and resource management
 - Better file management and cleanup strategies
 - Authentication and access control
@@ -58,17 +62,17 @@ TODO
 - Fix and improve the buffering and streaming for large files (diff hashing, chunking, chopping, etc.)
 - More protocol features like file listing, metadata retrieval, more commands etc.
 - Graceful shutdown and cleanup
-- Little bit client polish
+- Little bit client polish 
 - Protocol v2 meant to be use UDP, but skill issues...
 - Encrypted share feature between clients (stateless relay server) without sharing the master key, maybe using some kind
   of temporary keys or
   something, idk
-- Migrate to async architecture (TOKIO)
-- Too many repetitive code, need to refactor and clean up the codebase
+- Migrate to async architecture (TOKIO) [DONW]
+- Too many repetitive code, need to refactor and clean up the codebase [DONE]
 - Still some buffering issues, data gets stalls, does not flush properly
 - Multi-port support for better concurrency
 - rsync support (rolling hashing, delta transfers, etc.) CDC `LAYERING like docker`
-- Serialized headers, rm fragile parsing
+- Serialized headers, rm fragile parsing [DONE]
 - Add proper user-space (multiple users)
 - DO some CAS magic for better storage efficiency and deduplication
 

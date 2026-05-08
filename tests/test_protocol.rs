@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, JoinSet};
+use uuid::Uuid;
 
 pub const GARBAGE_SIZE: usize = 32 * 1024 * 1024;
 
@@ -98,6 +99,7 @@ async fn v1_client_upload(port: u16, data: &[u8], filename: &str, file_key: &str
     let file_hash = hex::encode(hasher.finalize()).to_string();
 
     let header = UploadHeader {
+        file_id: Uuid::new_v4().simple().to_string(),
         file_name: filename.to_string(),
         file_size: data.len() as u64,
         file_hash,

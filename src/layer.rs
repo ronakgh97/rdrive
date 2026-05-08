@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::fs::{File, OpenOptions};
@@ -28,6 +29,7 @@ pub struct Layer {
     pub layer_meta: LayerMeta,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct LayerMeta {
     pub hash: String,
     pub mem_offset: usize,
@@ -39,31 +41,23 @@ pub async fn read_file_layers(mut buf_reader: BufReader<File>) -> Result<Vec<Lay
     let mut mem_offset = 0usize;
 
     loop {
-        let mut buffer = vec![0u8; LAYER_SIZE];
-        let mut hasher = Sha256::new();
-        let mut read_idx = 0;
+        let mut buffer = Vec::with_capacity(LAYER_SIZE);
 
-        while read_idx < LAYER_SIZE {
-            let n = buf_reader.read(&mut buffer[read_idx..]).await?;
+        let n = (&mut buf_reader)
+            .take(LAYER_SIZE as u64)
+            .read_to_end(&mut buffer)
+            .await?;
 
-            if n == 0 {
-                break;
-            }
-
-            hasher.update(&buffer[read_idx..read_idx + n]);
-            read_idx += n;
-        }
-
-        if read_idx == 0 {
+        if n == 0 {
             break;
         }
 
         layers_meta.push(LayerMeta {
-            hash: hex::encode(hasher.finalize()),
+            hash: hex::encode(Sha256::digest(&buffer)),
             mem_offset,
         });
 
-        mem_offset += read_idx;
+        mem_offset += n;
     }
 
     Ok(layers_meta)
@@ -75,37 +69,24 @@ pub async fn read_data_layer(
     mut buf_reader: BufReader<File>,
     mem_offset: usize,
 ) -> Result<Option<Layer>> {
-    let mut buffer = vec![0u8; LAYER_SIZE];
+    let mut buffer = Vec::with_capacity(LAYER_SIZE);
 
     buf_reader.seek(SeekFrom::Start(mem_offset as u64)).await?;
 
-    let mut read_ptr = 0;
-    let mut hasher = Sha256::new();
+    let n = buf_reader
+        .take(LAYER_SIZE as u64)
+        .read_to_end(&mut buffer)
+        .await?;
 
-    while read_ptr < LAYER_SIZE {
-        let n = buf_reader.read(&mut buffer[read_ptr..]).await?;
-
-        if n == 0 {
-            break;
-        }
-
-        hasher.update(&buffer[read_ptr..read_ptr + n]);
-        read_ptr += n;
-    }
-
-    // offset beyond EOF
-    if read_ptr == 0 {
+    if n == 0 {
         return Ok(None);
     }
 
-    buffer.truncate(read_ptr);
+    let hash = hex::encode(Sha256::digest(&buffer));
 
     Ok(Some(Layer {
         data: buffer,
-        layer_meta: LayerMeta {
-            hash: hex::encode(hasher.finalize()),
-            mem_offset,
-        },
+        layer_meta: LayerMeta { hash, mem_offset },
     }))
 }
 

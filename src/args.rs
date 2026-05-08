@@ -43,12 +43,15 @@ pub struct ClientArgs {
 pub enum ClientCommands {
     /// User-specific operations, such as authentication, file management, etc.
     User {
-        /// Create a new user space
-        #[arg(short, long)]
-        add: String,
-        /// Remove a user space
-        #[arg(short, long)]
-        remove: String,
+        /// Create new user space
+        #[arg(short, long, conflicts_with_all = ["remove", "rotate"])]
+        add: Option<String>,
+        /// Remove  user space
+        #[arg(short, long, conflicts_with_all = ["add", "rotate"])]
+        remove: Option<String>,
+        /// Rotate user key for object access, requires decrypting/encrypting all metadata file (SLOW)
+        #[arg(short, long, conflicts_with_all = ["add", "remove"])]
+        rotate: Option<String>,
     },
 
     /// Upload a file to the server

@@ -22,6 +22,7 @@ impl Command {
 
 #[derive(Serialize, Deserialize)]
 pub struct UploadHeader {
+    pub file_id: String,
     pub file_name: String,
     pub file_size: u64,
     pub file_hash: String,
@@ -40,6 +41,11 @@ impl UploadHeader {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.file_id.is_empty() || self.file_id.len() <= 8 {
+            return Err(anyhow::anyhow!(
+                "File ID must be a non-empty string with more than 8 characters"
+            ));
+        }
         if self.file_name.is_empty() {
             return Err(anyhow::anyhow!("File name cannot be empty"));
         }
