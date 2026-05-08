@@ -261,7 +261,10 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     storage_path: &Path,
 ) -> Result<()> {
     let file_id = Uuid::new_v4().simple().to_string();
-    let file_path = storage_path.join(&file_id);
+    let dir_path = storage_path.join(&file_id);
+    let file_path = dir_path.join(&file_id);
+
+    tokio::fs::create_dir_all(&dir_path).await?;
 
     info!(
         "Start Uploading: {} ({} bytes) - Hash: {}...",
@@ -339,7 +342,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         file_key: headers.file_key,
     };
 
-    let metadata_path = storage_path.join(format!("{}.meta", file_id));
+    let metadata_path = dir_path.join(format!("{}.meta", file_id));
     metadata.save_to_disk_async(metadata_path).await?;
 
     SHARED_FILE_LOCK.remove(&file_id);
@@ -382,8 +385,9 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     let file_id = headers.file_id.replace("-", "_");
 
-    let file_path = storage_path.join(&file_id);
-    let meta_path = storage_path.join(format!("{}.meta", file_id));
+    let dir_path = storage_path.join(&file_id);
+    let file_path = dir_path.join(&file_id);
+    let meta_path = dir_path.join(format!("{}.meta", file_id));
 
     if !meta_path.exists() {
         warn!("Metadata not found for file_id: {}", file_id);
