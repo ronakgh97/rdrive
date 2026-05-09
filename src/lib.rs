@@ -1,15 +1,16 @@
+#[allow(unused)]
 use crate::crypto::{decrypt_data, encrypt_data};
 use anyhow::Result;
 use chrono::Local;
 use colored::Colorize;
 use dashmap::DashMap;
-use hex::decode;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -28,6 +29,15 @@ pub async fn get_storage_path() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
     let storage_path = home_dir.join(".rdrive").join("storage");
+    Ok(storage_path)
+}
+
+// TODO: Implement public space
+#[inline(always)]
+pub async fn get_public_storage_path() -> Result<PathBuf> {
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
+    let storage_path = home_dir.join(".rdrive").join("storage").join("public");
     Ok(storage_path)
 }
 
@@ -64,7 +74,7 @@ pub async fn file_hasher_async(path: &Path) -> Result<String> {
 }
 
 // TODO: THIS NEED A SERIOUS REFACTOR
-//  I'M DITCHING TYPICAL CORPORATE AUTH SLOP, THIS GOING TO BE DECENTRALIZED, FILE_SYSTEM AS PLAYGROUND
+//  I'M DITCHING TYPICAL CORPORATE AUTH SLOP, THIS GOING TO BE DECENTRALIZED NODE, FILE_SYSTEM AS PLAYGROUND
 //  Every file will go to either ~/.rdrive/storage/<file_key_hash + salt + timestamp>/<file-id> or
 //  ~/.rdrive/storage/<public>/<file-id>, THATS FUCK IT!!!!
 
@@ -80,13 +90,14 @@ impl MetadataFile {
     pub fn read_from_disk(path: &PathBuf) -> Result<Self> {
         use postcard::from_bytes;
 
-        let key = MASTER_KEY.clone();
-        let key_bytes = decode(key)?;
+        // TODO: Think over this later
+        // let key = MASTER_KEY.clone();
+        // let key_bytes = decode(key)?;
 
         let deserialized = std::fs::read(path)?;
-        let decrypted = decrypt_data(&deserialized, &key_bytes);
+        //let decrypted = decrypt_data(&deserialized, &key_bytes);
 
-        let metadata = from_bytes(&decrypted)?;
+        let metadata = from_bytes(&deserialized)?;
         Ok(metadata)
     }
 
@@ -98,13 +109,14 @@ impl MetadataFile {
     pub fn save_to_disk(&self, path: &PathBuf) -> Result<()> {
         use postcard::to_allocvec;
 
-        let key = MASTER_KEY.clone();
-        let key_bytes = decode(key)?;
+        // TODO: Think over this later
+        // let key = MASTER_KEY.clone();
+        // let key_bytes = decode(key)?;
 
         let serialized = to_allocvec(self)?;
-        let encrypted = encrypt_data(&serialized, &key_bytes);
+        //let encrypted = encrypt_data(&serialized, &key_bytes);
 
-        std::fs::write(path, encrypted)?;
+        std::fs::write(path, serialized)?;
         Ok(())
     }
 
@@ -188,18 +200,26 @@ impl Catalog {
 }
 
 pub static START_TIME: OnceLock<chrono::DateTime<Local>> = OnceLock::new();
-pub static SHARED_FILE_LOCK: LazyLock<Arc<DashMap<String, String>>> =
-    LazyLock::new(|| Arc::new(DashMap::new()));
-pub static MASTER_KEY: LazyLock<String> = LazyLock::new(|| {
-    dotenv::dotenv().ok();
-    std::env::var("MASTER_KEY").expect("MASTER_KEY environment variable must be set for encryption")
+pub static ACTIVE_CONNECTIONS: LazyLock<Arc<AtomicUsize>> =
+    LazyLock::new(|| Arc::new(AtomicUsize::new(0)));
+pub static MAX_CONNECTIONS: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("MAX_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256) // default to 256 connections
 });
-pub static MAX_CONNECTIONS: OnceLock<usize> = OnceLock::new();
 pub static MAX_FILE_SIZE: LazyLock<u64> = LazyLock::new(|| {
     std::env::var("MAX_FILE_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8 * 1024 * 1024 * 1024) // 8 GB default
+});
+
+pub static SHARED_FILE_LOCK: LazyLock<Arc<DashMap<String, String>>> =
+    LazyLock::new(|| Arc::new(DashMap::new()));
+pub static MASTER_KEY: LazyLock<String> = LazyLock::new(|| {
+    dotenv::dotenv().ok();
+    std::env::var("MASTER_KEY").expect("MASTER_KEY environment variable must be set for encryption")
 });
 
 pub const NETWORK_READ_BUFFER: usize = 4 * 1024 * 1024;

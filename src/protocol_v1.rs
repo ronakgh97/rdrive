@@ -3,9 +3,9 @@ use crate::header::{
     UploadResponse,
 };
 use crate::{
-    MetadataFile, NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT,
-    SERVER_TRACKER, SHARED_FILE_LOCK, START_TIME, WRITE_TIMEOUT, debug, error, file_hasher_async,
-    info, trace, try_get_uptime_hrs, warn,
+    ACTIVE_CONNECTIONS, MAX_CONNECTIONS, MetadataFile, NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER,
+    READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER, SHARED_FILE_LOCK, START_TIME, WRITE_TIMEOUT,
+    debug, error, file_hasher_async, info, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use std::cmp::min;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -24,34 +24,29 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
 /// Entry-point for TCP server using the v1 protocol
-pub async fn start_tcp_server(
-    port: u16,
-    max_connections: usize,
-    storage_path: Arc<PathBuf>,
-) -> Result<()> {
+pub async fn start_tcp_server(port: u16, storage_path: Arc<PathBuf>) -> Result<()> {
     let now = chrono::Local::now();
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
-    let active_connections = Arc::new(AtomicUsize::new(0));
-
     info!(
-        "TCP Server (v1 protocol) listening on 0.0.0.0:{} (max connections: {})",
-        port, max_connections
+        "TCP Server (protocol v1) listening on 0.0.0.0:{} (Max connections: {})",
+        port, *MAX_CONNECTIONS
     );
+
     START_TIME.get_or_init(|| now);
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 // Check connection limit
-                let current = active_connections.fetch_add(1, Ordering::Relaxed);
-                if current >= max_connections {
-                    active_connections.fetch_sub(1, Ordering::Relaxed);
+                let current = ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+                if current >= *MAX_CONNECTIONS {
+                    ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
                     warn!("Connection rejected (max connections): {:?}", addr);
                     drop(stream); // Instant close
                     continue;
                 }
                 let storage_path = Arc::clone(&storage_path);
-                let active_connections = Arc::clone(&active_connections);
+                let active_connections = Arc::clone(&ACTIVE_CONNECTIONS);
                 info!("Connection request from {:?}", addr);
                 tokio::spawn(async move {
                     trace!("Task spawned for connection from {:?}", addr);
@@ -70,13 +65,12 @@ pub async fn start_tcp_server(
 }
 
 /// Handle a single client connection, read command and dispatch to appropriate handler
-#[inline]
+#[inline(always)]
 async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result<()> {
-    let start_time = Instant::now();
     stream.set_nodelay(true).ok();
-
     let (mut reader, mut writer) = stream.split();
 
+    let start_time = Instant::now();
     let command = match read_headers(&mut reader).await {
         Ok(cmd) => cmd,
         Err(e) => {
@@ -127,8 +121,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
 
             match header.validate() {
                 Ok(_) => {
-                    handle_download(&mut reader, &mut writer, header, start_time, storage_path)
-                        .await?;
+                    handle_download(&mut reader, &mut writer, header, storage_path).await?;
                 }
                 Err(e) => {
                     send_failed(
@@ -266,10 +259,13 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     time_start: Instant,
     storage_path: &Path,
 ) -> Result<()> {
-    let dir_path = storage_path.join(&headers.file_id);
+    let hashed_file_key = encode(Sha256::digest(headers.file_key.as_bytes()));
+
+    let dir_path = storage_path.join(&hashed_file_key);
     let file_path = dir_path.join(format!("{}.file", &headers.file_id));
     let metadata_path = dir_path.join(format!("{}.meta", &headers.file_id));
 
+    // TODO: For layering implement we have to <file-id> dir inside <hash_file_key> dir
     tokio::fs::create_dir_all(&dir_path).await?;
 
     info!(
@@ -279,7 +275,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         headers.file_hash[..8].dimmed()
     );
 
-    SHARED_FILE_LOCK.insert(headers.file_id.clone(), headers.file_name.clone());
+    SHARED_FILE_LOCK.insert(headers.file_id.clone(), "".to_string());
 
     // Send ACK
     timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??;
@@ -323,7 +319,6 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         return Ok(());
     }
 
-    let hashed_file_key = encode(Sha256::digest(headers.file_key.as_bytes()));
     let metadata = MetadataFile {
         filename: headers.file_name,
         file_size: headers.file_size,
@@ -360,7 +355,6 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     _reader: &mut R,
     writer: &mut W,
     headers: DownloadHeader,
-    _start_time: Instant,
     storage_path: &Path,
 ) -> Result<()> {
     if SHARED_FILE_LOCK.contains_key(&headers.file_id) {
@@ -375,13 +369,26 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         return Ok(());
     }
 
-    let file_id = headers.file_id;
-    let dir_path = storage_path.join(&file_id);
-    let file_path = dir_path.join(format!("{}.file", file_id));
-    let meta_path = dir_path.join(format!("{}.meta", file_id));
+    let hashed_file_key = encode(Sha256::digest(headers.file_key.as_bytes()));
+
+    let dir_path = storage_path.join(&hashed_file_key);
+    if !dir_path.exists() {
+        send_failed(
+            writer,
+            ErrorHeader {
+                code: 404,
+                message: "File not found".to_string(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let file_path = dir_path.join(format!("{}.file", &headers.file_id));
+    let meta_path = dir_path.join(format!("{}.meta", &headers.file_id));
 
     if !meta_path.exists() {
-        warn!("Metadata not found for file_id: {}", file_id);
+        warn!("Metadata not found for file_id: {}", &headers.file_id);
         send_failed(
             writer,
             ErrorHeader {
@@ -396,7 +403,10 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let metadata: MetadataFile = match MetadataFile::read_from_disk_async(&meta_path).await {
         Ok(meta) => meta,
         Err(e) => {
-            error!("Failed to read metadata for file {}: {}", file_id, e);
+            error!(
+                "Failed to read metadata for file {}: {}",
+                &headers.file_id, e
+            );
             return send_failed(
                 writer,
                 ErrorHeader {
@@ -411,24 +421,10 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let file_name = metadata.filename;
     let file_size = metadata.file_size;
     let file_hash = metadata.file_hash;
-    let file_key = encode(Sha256::digest(headers.file_key.as_bytes()));
-
-    if metadata.hashed_file_key != file_key {
-        warn!("Invalid file key for file_id: {}", file_id);
-        send_failed(
-            writer,
-            ErrorHeader {
-                code: 403,
-                message: "Invalid file key".to_string(),
-            },
-        )
-        .await?;
-        return Ok(());
-    }
 
     info!(
         "Downloading: {} ({} bytes) - Hash: {}...",
-        file_id.dimmed(),
+        &headers.file_id.dimmed(),
         file_size,
         file_hash[..8].dimmed()
     );
@@ -460,7 +456,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     writer.flush().await?;
     writer.shutdown().await?;
 
-    info!("Download complete: File-ID: {}", file_id.dimmed());
+    info!("Download complete: File-ID: {}", &headers.file_id.dimmed());
 
     let mut lock = SERVER_TRACKER.write().await;
     lock.total_bandwidth_gb += file_size as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -505,7 +501,7 @@ pub async fn upload_client(
     let file_hash = file_hasher_async(&file_path)
         .await
         .context("Failed to compute file hash")?;
-    println!("File hash: {}...", file_hash[..8].dimmed());
+    println!("File hash: {}", file_hash.dimmed());
 
     pg_bar.set_style(
         ProgressStyle::default_bar()

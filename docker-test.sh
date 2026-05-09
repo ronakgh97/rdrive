@@ -33,7 +33,7 @@ sleep 3
 
 # Generate random test file inside container
 TEST_FILE="/tmp/test_garbage.bin"
-echo "Generating ${GARBAGE_SIZE_MB}MB random test file ==="
+echo "Generating ${GARBAGE_SIZE_MB}MB random test file"
 docker exec rdrive-server-v1 sh -c "dd if=/dev/urandom of=$TEST_FILE bs=1M count=$GARBAGE_SIZE_MB 2>/dev/null"
 ORIGINAL_HASH=$(docker exec rdrive-server-v1 md5sum $TEST_FILE | awk '{print $1}')
 echo "Original hash: $ORIGINAL_HASH"
@@ -60,28 +60,4 @@ if [ "$ORIGINAL_HASH" != "$DOWNLOAD_HASH" ]; then
     echo "v1 FAILED: hash mismatch"
     exit 1
 fi
-echo "v1 passed!"
 
-# Test v2
-echo "Testing v2 client binary upload"
-FILE_ID=$(docker exec rdrive-server-v2 /app/target/release/rdrive \
-  push --file $TEST_FILE --port 3001 --protocol v2 --file-key testkey123 2>&1)
-echo "v2 upload output: $FILE_ID"
-
-FILE_ID=$(echo "$FILE_ID" | grep -o '[a-f0-9-]\{36\}' | head -1)
-echo "v2 file-id: $FILE_ID"
-
-echo "Testing v2 client binary download"
-docker exec rdrive-server-v2 /app/target/release/rdrive \
-  pull --file-id "$FILE_ID" --file-key testkey123 --port 3001 --protocol v2 --output /tmp/test_download.bin 2>&1
-
-DOWNLOAD_HASH=$(docker exec rdrive-server-v2 md5sum /tmp/test_download.bin | awk '{print $1}')
-echo "v2 downloaded hash: $DOWNLOAD_HASH"
-
-if [ "$ORIGINAL_HASH" != "$DOWNLOAD_HASH" ]; then
-    echo "v2 FAILED: hash mismatch"
-    exit 1
-fi
-echo "v2 passed!"
-
-echo "All tests passed"

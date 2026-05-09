@@ -73,9 +73,9 @@ pub fn hash_chunk(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Generate a random 32-byte key or token and return it as a hex string
+/// Generate a generic random 32-byte key and return it as a hex string
 #[inline(always)]
-pub fn generate_key_token() -> String {
+pub fn generate_key() -> String {
     let mut rng = rand::rng();
     let mut key = [0u8; 32];
     rng.fill_bytes(&mut key);

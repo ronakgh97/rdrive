@@ -60,7 +60,7 @@ async fn start_server_v1(port: u16) -> JoinHandle<()> {
     tokio::fs::create_dir_all(&path).await.unwrap();
 
     let handle = tokio::spawn(async move {
-        r_drive::protocol_v1::start_tcp_server(port, 128, Arc::new(path))
+        r_drive::protocol_v1::start_tcp_server(port, Arc::new(path))
             .await
             .unwrap();
     });

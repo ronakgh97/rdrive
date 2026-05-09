@@ -172,7 +172,12 @@ async fn main() -> Result<()> {
             todo!("Non-trivial to implement this feature")
         }
         Some(ClientCommands::Ls { .. }) => {
-            let file_map = Catalog::read(&get_catalog_path()?).await?;
+            let file_map = Catalog::read(&get_catalog_path()?).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to read catalog, make sure to push at least one file before listing: {}",
+                    e
+                )
+            })?;
 
             for (id, file) in file_map.file_map {
                 println!(

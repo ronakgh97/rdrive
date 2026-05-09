@@ -10,18 +10,21 @@ docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name
 then you can use the CLI to push/pull files
 
 ```shell
-rdrive push --file dummy.bin --port 3000 --protocol v1       
-Enter a lock key: ronak
-↪ Starting upload: dummy.bin (1180000000 bytes)
-↪ File hash: ef5bfea558b31b8ecf673a0445ec035394f9a3a40fad69cd8a9ad1c5f5aaf56b...
-File ID: 2e8e2c5e-9f36-4369-802f-81d6b7fc0e69 - Time took: 3.350482605
+rdrive push --file dummy.bin --protocol v1 --port 3000
+Enter file key: ronak
+1 a547a8a15a9b4ae890b8fe06bb542efe | pushed (2026-05-09 20:15:55) | pulled (never)
+2 ac69860b5948400992116baca7f845f6 | pushed (2026-05-09 20:16:05) | pulled (never)
+File already exists, overwrite? [N/0]: 0
+Starting upload: dummy.bin (578.9375 mb)
+File hash: 4ea1b5d5...
+File ID: 0067f7174e754a9297f9ff35a6356ad2 - Time took: 1.5184643
 ````
 
 ```shell
-rdrive pull --port 3000 --protocol v1
-Enter file ID: 2e8e2c5e-9f36-4369-802f-81d6b7fc0e69
+rdrive pull --protocol v1 --port 3000                 
+Enter file ID: a547a8a15a9b4ae890b8fe06bb542efe
 Enter file key: ronak
-↩ Downloading: dummy.bin (1180000000 bytes)
+Downloading: dummy.bin (578.9375 mb)
 Saved to: .\dummy.bin
 ```
 
@@ -77,6 +80,7 @@ TODO
 - Add proper user-space (multiple users)
 - DO some CAS magic for better storage efficiency and deduplication
 - Backup and restore features
+- Fix the MASTER_KEY/Encrption redundancy
 
 https://www.backblaze.com/docs/cloud-storage-about-backblaze-b2-cloud-storage
 
