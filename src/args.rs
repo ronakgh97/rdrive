@@ -6,7 +6,7 @@ use std::path::PathBuf;
     name = "r-drive",
     version = "1.0.0-gamma",
     about = "r-drive; a simple file storage and sharing with secure protocol, backups, and versioning support",
-    long_about = "a fast and secure object storage server, uses CAS/layering like docker image hub and versioning & backups support"
+    long_about = "a fast and zero-trust object storage node, uses CAS/Layering like docker image hub and versioning & backups support"
 )]
 pub struct ServerArgs {
     #[command(subcommand)]
@@ -25,6 +25,8 @@ pub enum ServerCommands {
         #[arg(long, default_value = "v1")]
         protocol: String,
     },
+    /// Rotate MASTER_KEY locally, (can be slow for 'obvious reason')
+    Rotate {},
 }
 
 #[derive(Parser)]
@@ -41,6 +43,7 @@ pub struct ClientArgs {
 
 #[derive(Subcommand)]
 pub enum ClientCommands {
+    // TODO: Tiny auth layer can be implement using Master Key + Timestamp Hashing for Ephemeral Keys
     /// Upload a file to the server
     Push {
         /// Path to the file to upload
