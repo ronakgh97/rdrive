@@ -7,6 +7,7 @@ use r_drive::protocol_v1::{
 };
 use r_drive::{Catalog, ascii_art, get_catalog_path};
 use std::io;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
             let file_key = if let Some(key) = file_key {
                 key
             } else {
-                print!("Enter a lock key: ");
+                print!("Enter file key: ");
                 io::Write::flush(&mut io::stdout())?;
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
@@ -39,14 +40,11 @@ async fn main() -> Result<()> {
                 input.trim().to_string()
             };
 
-            let key = match protocol.as_str() {
-                "v1" => upload_file_v1(file.clone(), file_key, &address, port).await?,
-                "v2" => todo!("UDP protocol is WIP"),
-                _ => {
-                    eprintln!("Unknown protocol: {}", protocol);
-                    std::process::exit(1);
-                }
-            };
+            let file_name = file
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Invalid file name"))?
+                .to_string_lossy()
+                .to_string();
 
             let catalog_path = get_catalog_path()?;
             let catalog_dir = catalog_path
@@ -61,11 +59,53 @@ async fn main() -> Result<()> {
                 Catalog::default()
             };
 
-            catalog
-                .file_map
-                .insert(key, file.file_name().unwrap().to_string_lossy().to_string());
+            let file_id = if let Some(uuids) = catalog.file_index.get(&file_name) {
+                // TODO: Changed to selection based
+                let tracked_uuid = uuids
+                    .last()
+                    .ok_or_else(|| anyhow::anyhow!("Corrupted file index"))?;
 
-            catalog.write(&catalog_path).await?;
+                for (i, uuid) in uuids.iter().enumerate() {
+                    let info = catalog
+                        .file_map
+                        .get(uuid)
+                        .ok_or_else(|| anyhow::anyhow!("Corrupted file map"))?;
+                    println!(
+                        "{} | {} Last pushed [{}] | Last pulled [{}]",
+                        i + 1,
+                        uuid.yellow(),
+                        info.last_push,
+                        info.last_pull
+                    );
+                }
+                print!("File already exists, Overwrite latest [y/n]?: ");
+
+                let input = {
+                    io::Write::flush(&mut io::stdout())?;
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    input.trim().to_lowercase()
+                };
+                if input.eq_ignore_ascii_case("y") {
+                    tracked_uuid.clone()
+                } else {
+                    Uuid::new_v4().simple().to_string()
+                }
+            } else {
+                Uuid::new_v4().simple().to_string()
+            };
+
+            match protocol.as_str() {
+                "v1" => upload_file_v1(file, file_key, &file_id, &address, port).await?,
+                "v2" => todo!("UDP protocol is WIP"),
+                _ => {
+                    eprintln!("Unknown protocol: {}", protocol);
+                    std::process::exit(1);
+                }
+            };
+            catalog
+                .update_on_push(&catalog_path, &file_name, &file_id)
+                .await?;
         }
         Some(ClientCommands::Pull {
             dir,
@@ -106,7 +146,20 @@ async fn main() -> Result<()> {
 
             match protocol.as_str() {
                 "v1" => {
-                    download_file_v1(file_id, file_key, dir, &address, port).await?;
+                    let downloaded_path =
+                        download_file_v1(&file_id, file_key, dir, &address, port).await?;
+                    let _file_name = downloaded_path
+                        .file_name()
+                        .ok_or_else(|| anyhow::anyhow!("Invalid downloaded file name"))?
+                        .to_string_lossy()
+                        .to_string();
+
+                    let catalog_path = get_catalog_path()?;
+
+                    if catalog_path.exists() {
+                        let mut catalog = Catalog::read(&catalog_path).await?;
+                        catalog.update_on_pull(&catalog_path, &file_id).await?;
+                    }
                 }
                 "v2" => {
                     todo!("UDP protocol is WIP")
@@ -150,8 +203,21 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         },
-        Some(ClientCommands::User { .. }) => {
-            todo!("WIP: Multi user space is not implemented yet")
+        // TODO: Freeze this, fuck this
+        Some(ClientCommands::User {
+            add,
+            remove,
+            rotate,
+        }) => {
+            if let Some(_add) = add {
+                // handle add and return
+            }
+            if let Some(_remove) = remove {
+                // handle remove and return
+            }
+            if let Some(_rotate) = rotate {
+                // handle rotate and return
+            }
         }
         None => {
             ascii_art();
@@ -164,9 +230,22 @@ async fn main() -> Result<()> {
 async fn list_file_map() -> Result<()> {
     let file_map = Catalog::read(&get_catalog_path()?).await?;
 
-    for (id, name) in file_map.file_map {
-        println!("  {} - {}", id.yellow(), name.cyan());
+    for (id, obj) in file_map.file_map {
+        println!("  {} - {}", id.yellow(), obj.name.cyan());
     }
 
     Ok(())
+}
+
+#[allow(unused)]
+fn user_prompt(msg: &str) -> Result<String> {
+    print!("{}", msg);
+    io::Write::flush(&mut io::stdout())?;
+    let mut id = String::new();
+    io::stdin().read_line(&mut id)?;
+    if id.trim().is_empty() {
+        eprintln!("File ID cannot be empty");
+        std::process::exit(1);
+    }
+    Ok(id.trim().to_string())
 }

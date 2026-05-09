@@ -28,6 +28,8 @@ Saved to: .\dummy.bin
 > Create MASTER KEY, beforehand otherwise when server restarts, your file will have no way to decrypt,
 > since server generates KEY on-the-fly
 
+> Concurrent downloads are not supported yet
+
 layering/CAS (WIP)
 
 ```shell
@@ -52,7 +54,7 @@ test layer::experimental_layer_test ... ok
 
 TODO
 
-- Better Encryption for storage and metadata 
+- Better Encryption for storage and metadata
 - Better Bandwidth tracking and limits [DONE]
 - Better Error handling and logging [DONE]
 - Thread pool for better concurrency and resource management
@@ -60,16 +62,16 @@ TODO
 - Authentication and access control
 - Uhm...what else?
 - Fix and improve the buffering and streaming for large files (diff hashing, chunking, chopping, etc.)
-- More protocol features like file listing, metadata retrieval, more commands etc.
+- More protocol features like file listing, metadata retrieval, more commands etc. [DONE]
 - Graceful shutdown and cleanup
-- Little bit client polish 
+- Little bit client polish
 - Protocol v2 meant to be use UDP, but skill issues...
 - Encrypted share feature between clients (stateless relay server) without sharing the master key, maybe using some kind
   of temporary keys or
   something, idk
-- Migrate to async architecture (TOKIO) [DONW]
+- Migrate to async architecture (TOKIO) [DONE]
 - Too many repetitive code, need to refactor and clean up the codebase [DONE]
-- Still some buffering issues, data gets stalls, does not flush properly
+- Still some buffering issues, data gets stalls, does not flush properly [DONE]
 - Multi-port support for better concurrency
 - rsync support (rolling hashing, delta transfers, etc.) CDC `LAYERING like docker`
 - Serialized headers, rm fragile parsing [DONE]

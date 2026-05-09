@@ -63,24 +63,24 @@ pub async fn file_hasher_async(path: &Path) -> Result<String> {
 }
 
 #[derive(Deserialize, Serialize)]
-pub struct Metadata {
+pub struct MetadataFile {
     filename: String,
     file_size: u64,
     file_hash: String,
-    file_key: String,
+    hashed_file_key: String,
 }
 
-impl Metadata {
+impl MetadataFile {
     pub fn read_from_disk(path: &PathBuf) -> Result<Self> {
         use postcard::from_bytes;
 
         let key = MASTER_KEY.get_or_init(generate_master_key).clone();
-
         let key_bytes = decode(key)?;
-        let encrypted = std::fs::read(path)?;
-        let read_bytes = decrypt_data(&encrypted, &key_bytes);
 
-        let metadata = from_bytes(&read_bytes)?;
+        let deserialized = std::fs::read(path)?;
+        let decrypted = decrypt_data(&deserialized, &key_bytes);
+
+        let metadata = from_bytes(&decrypted)?;
         Ok(metadata)
     }
 
@@ -93,8 +93,8 @@ impl Metadata {
         use postcard::to_allocvec;
 
         let key = MASTER_KEY.get_or_init(generate_master_key).clone();
-
         let key_bytes = decode(key)?;
+
         let serialized = to_allocvec(self)?;
         let encrypted = encrypt_data(&serialized, &key_bytes);
 
@@ -102,14 +102,23 @@ impl Metadata {
         Ok(())
     }
 
-    pub async fn save_to_disk_async(self, path: PathBuf) -> Result<()> {
+    pub async fn save_to_disk_async(self, path: &Path) -> Result<()> {
+        let path = path.to_path_buf();
         tokio::task::spawn_blocking(move || self.save_to_disk(&path)).await?
     }
 }
 
 #[derive(Deserialize, Serialize, Default)]
+pub struct FileInfo {
+    pub name: String,
+    pub last_push: String,
+    pub last_pull: String,
+}
+
+#[derive(Deserialize, Serialize, Default)]
 pub struct Catalog {
-    pub file_map: HashMap<String, String>,
+    pub file_map: HashMap<String, FileInfo>,
+    pub file_index: HashMap<String, Vec<String>>,
 }
 
 impl Catalog {
@@ -128,10 +137,51 @@ impl Catalog {
         tokio::fs::write(path, bytes).await?;
         Ok(())
     }
+
+    pub async fn update_on_push(
+        &mut self,
+        path: &PathBuf,
+        file_name: &str,
+        file_id: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+
+        self.file_map
+            .entry(file_id.to_string())
+            .and_modify(|meta| {
+                meta.last_push = now.clone();
+            })
+            .or_insert_with(|| FileInfo {
+                name: file_name.to_string(),
+                last_push: now.clone(),
+                last_pull: "never".to_string(),
+            });
+        self.file_index
+            .entry(file_name.to_string())
+            .and_modify(|tracked| {
+                if !tracked.contains(&file_id.to_string()) {
+                    tracked.push(file_id.to_string());
+                }
+            })
+            .or_insert_with(|| vec![file_id.to_string()]);
+
+        self.write(path).await?;
+
+        Ok(())
+    }
+    pub async fn update_on_pull(&mut self, path: &PathBuf, file_id: &str) -> Result<()> {
+        if let Some(meta) = self.file_map.get_mut(file_id) {
+            meta.last_pull = chrono::Utc::now().to_rfc3339();
+        }
+        self.write(path).await?;
+
+        Ok(())
+    }
 }
 
 pub static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
-pub static SHARED_FILE_LOCK: LazyLock<DashMap<String, String>> = LazyLock::new(DashMap::new);
+pub static SHARED_FILE_LOCK: LazyLock<Arc<DashMap<String, String>>> =
+    LazyLock::new(|| Arc::new(DashMap::new()));
 pub static MASTER_KEY: OnceLock<String> = OnceLock::new();
 pub static MAX_CONNECTIONS: OnceLock<usize> = OnceLock::new();
 pub static MAX_FILE_SIZE: LazyLock<u64> = LazyLock::new(|| {

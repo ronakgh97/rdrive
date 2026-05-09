@@ -3,7 +3,7 @@ use crate::header::{
     UploadResponse,
 };
 use crate::{
-    Metadata, NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT,
+    MetadataFile, NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT,
     SERVER_TRACKER, SHARED_FILE_LOCK, START_TIME, WRITE_TIMEOUT, debug, error, file_hasher_async,
     info, trace, try_get_uptime_hrs, warn,
 };
@@ -21,7 +21,6 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
-use uuid::Uuid;
 
 /// Entry-point for TCP server using the v1 protocol
 pub async fn start_tcp_server(
@@ -260,20 +259,20 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     time_start: Instant,
     storage_path: &Path,
 ) -> Result<()> {
-    let file_id = Uuid::new_v4().simple().to_string();
-    let dir_path = storage_path.join(&file_id);
-    let file_path = dir_path.join(&file_id);
+    let dir_path = storage_path.join(&headers.file_id);
+    let file_path = dir_path.join(format!("{}.file", &headers.file_id));
+    let metadata_path = dir_path.join(format!("{}.meta", &headers.file_id));
 
     tokio::fs::create_dir_all(&dir_path).await?;
 
     info!(
         "Start Uploading: {} ({} bytes) - Hash: {}...",
-        headers.file_name,
+        headers.file_id.dimmed(),
         headers.file_size,
         headers.file_hash[..8].dimmed()
     );
 
-    SHARED_FILE_LOCK.insert(file_id.clone(), headers.file_name.clone());
+    SHARED_FILE_LOCK.insert(headers.file_id.clone(), headers.file_name.clone());
 
     // Send ACK
     timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??;
@@ -298,24 +297,6 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     }
     buf_file.flush().await?;
 
-    // // TODO: this check is quite redundant since, validate() handles that
-    // if received != headers.file_size {
-    //     tokio::fs::remove_file(&file_path).await.ok();
-    //     SHARED_FILE_LOCK.remove(&file_id);
-    //     send_failed(
-    //         writer,
-    //         ErrorHeader {
-    //             code: 400,
-    //             message: format!(
-    //                 "File size mismatch: expected {} bytes but received {} bytes",
-    //                 &headers.file_size, received
-    //             ),
-    //         },
-    //     )
-    //     .await?;
-    //     return Ok(());
-    // }
-
     let computed_hash = hex::encode(hasher.finalize());
     if computed_hash != headers.file_hash {
         tokio::fs::remove_file(&file_path).await.ok();
@@ -323,7 +304,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
             "Hash mismatch: expected {} but computed {}",
             &headers.file_hash, computed_hash
         );
-        SHARED_FILE_LOCK.remove(&file_id);
+        SHARED_FILE_LOCK.remove(&headers.file_id);
         send_failed(
             writer,
             ErrorHeader {
@@ -335,27 +316,31 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         return Ok(());
     }
 
-    let metadata = Metadata {
+    let hashed_file_key = hex::encode(Sha256::digest(headers.file_key.as_bytes()));
+    let metadata_file = MetadataFile {
         filename: headers.file_name,
         file_size: headers.file_size,
         file_hash: headers.file_hash,
-        file_key: headers.file_key,
+        hashed_file_key,
     };
+    metadata_file.save_to_disk_async(&metadata_path).await?;
 
-    let metadata_path = dir_path.join(format!("{}.meta", file_id));
-    metadata.save_to_disk_async(metadata_path).await?;
-
-    SHARED_FILE_LOCK.remove(&file_id);
+    SHARED_FILE_LOCK.remove(&headers.file_id);
 
     let time_took = time_start.elapsed().as_secs_f32();
-
     info!(
-        "Upload complete: File-ID: {}... Time_taken: {}F",
-        &file_id[..8].dimmed(),
+        "Upload complete: File-ID: {} Time_taken: {}sec",
+        &headers.file_id.dimmed(),
         time_took
     );
-
-    send_success(writer, &UploadResponse { file_id, time_took }).await?;
+    send_success(
+        writer,
+        &UploadResponse {
+            file_id: headers.file_id,
+            time_took,
+        },
+    )
+    .await?;
 
     let mut lock = SERVER_TRACKER.write().await;
     lock.total_bandwidth_gb += headers.file_size as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -383,10 +368,9 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         return Ok(());
     }
 
-    let file_id = headers.file_id.replace("-", "_");
-
+    let file_id = headers.file_id;
     let dir_path = storage_path.join(&file_id);
-    let file_path = dir_path.join(&file_id);
+    let file_path = dir_path.join(format!("{}.file", file_id));
     let meta_path = dir_path.join(format!("{}.meta", file_id));
 
     if !meta_path.exists() {
@@ -402,7 +386,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         return Ok(());
     }
 
-    let metadata: Metadata = match Metadata::read_from_disk_async(&meta_path).await {
+    let metadata: MetadataFile = match MetadataFile::read_from_disk_async(&meta_path).await {
         Ok(meta) => meta,
         Err(e) => {
             error!("Failed to read metadata for file {}: {}", file_id, e);
@@ -420,8 +404,9 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let file_name = metadata.filename;
     let file_size = metadata.file_size;
     let file_hash = metadata.file_hash;
+    let hashed_file_key = hex::encode(Sha256::digest(headers.file_key.as_bytes()));
 
-    if metadata.file_key != headers.file_key {
+    if metadata.hashed_file_key != hashed_file_key {
         warn!("Invalid file key for file_id: {}", file_id);
         send_failed(
             writer,
@@ -435,8 +420,10 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     }
 
     info!(
-        "Downloading: {} ({} bytes) - File-ID: {}",
-        file_name, file_size, file_id
+        "Downloading: {} ({} bytes) - Hash: {}...",
+        file_id.dimmed(),
+        file_size,
+        file_hash[..8].dimmed()
     );
 
     let header = DownloadResponse {
@@ -467,7 +454,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     writer.flush().await?;
     writer.shutdown().await?;
 
-    info!("Download complete: File-ID: {}", file_id);
+    info!("Download complete: File-ID: {}", file_id.dimmed());
 
     let mut lock = SERVER_TRACKER.write().await;
     lock.total_bandwidth_gb += file_size as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -476,18 +463,19 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 }
 
 pub async fn upload_client(
-    path: PathBuf,
-    lock_key: String,
+    file_path: PathBuf,
+    file_key: String,
+    file_id: &str,
     host: &str,
     port: u16,
 ) -> Result<String> {
-    let file_name = path
+    let file_name = file_path
         .file_name()
         .context("Invalid file path")?
         .to_string_lossy()
         .to_string();
 
-    let metadata = tokio::fs::metadata(&path)
+    let metadata = tokio::fs::metadata(&file_path)
         .await
         .context("Failed to read file metadata")?;
     let file_size = metadata.len();
@@ -502,10 +490,10 @@ pub async fn upload_client(
 
     println!("Starting upload: {} ({} bytes)", file_name, file_size);
 
-    let file_hash = file_hasher_async(&path)
+    let file_hash = file_hasher_async(&file_path)
         .await
         .context("Failed to compute file hash")?;
-    println!("File hash: {}...", file_hash[..8].to_string().dimmed());
+    println!("File hash: {}...", file_hash[..8].dimmed());
 
     pg_bar.set_style(
         ProgressStyle::default_bar()
@@ -514,10 +502,11 @@ pub async fn upload_client(
     );
 
     let request = Command::Upload(UploadHeader {
+        file_id: file_id.to_string(),
         file_name,
         file_size,
         file_hash,
-        file_key: lock_key,
+        file_key,
     })
     .serialize()?;
 
@@ -548,7 +537,9 @@ pub async fn upload_client(
         anyhow::bail!("Upload failed: {} - {}", err.code, err.message);
     }
 
-    let file = File::open(&path).await.context("Failed to reopen file")?;
+    let file = File::open(&file_path)
+        .await
+        .context("Failed to reopen file")?;
     let mut buf_file = BufReader::with_capacity(READ_CHUNK_SIZE * 2, file);
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
@@ -598,7 +589,7 @@ pub async fn upload_client(
 }
 
 pub async fn download_client(
-    file_id: String,
+    file_id: &str,
     file_key: String,
     output: Option<PathBuf>,
     host: &str,
@@ -607,7 +598,11 @@ pub async fn download_client(
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true).ok();
 
-    let request = Command::Download(DownloadHeader { file_id, file_key }).serialize()?;
+    let request = Command::Download(DownloadHeader {
+        file_id: file_id.to_string(),
+        file_key,
+    })
+    .serialize()?;
 
     let (reader, writer) = stream.split();
     let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
