@@ -41,9 +41,13 @@ impl UploadHeader {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.file_id.is_empty() || self.file_id.len() <= 8 {
+        if self.file_id.is_empty()
+            || !(32..=256).contains(&self.file_id.len())
+            || self.file_id.chars().any(|c| c.is_control())
+            || !self.file_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
             return Err(anyhow::anyhow!(
-                "File ID must be a non-empty string with more than 8 characters"
+                "File ID must be a non-empty hex string between 32 and 256 characters, without control characters"
             ));
         }
         if self.file_name.is_empty() {
@@ -80,6 +84,7 @@ pub struct DownloadHeader {
     pub file_id: String,
     pub file_key: String,
 }
+
 impl DownloadHeader {
     pub fn serialize(&self) -> Result<Vec<u8>> {
         postcard::to_allocvec(self)
@@ -106,7 +111,6 @@ pub struct DownloadResponse {
     pub file_name: String,
     pub file_size: u64,
     pub file_hash: String,
-    pub file_key: String,
 }
 
 impl DownloadResponse {

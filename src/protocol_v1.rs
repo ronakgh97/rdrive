@@ -9,6 +9,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
+use hex::encode;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -155,6 +156,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
 // Read 4 bytes for frame length with timeout, return error on timeout or read failure
 #[inline(always)]
 pub async fn read_frame_length<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u32> {
+    const MAX_FRAME_LENGTH: u32 = 1024 * 1024 * 12;
     let mut len_buf = [0u8; 4];
     let Ok(result) = timeout(READ_TIMEOUT, reader.read_exact(&mut len_buf)).await else {
         return Err(anyhow::anyhow!("Timeout reading frame length"));
@@ -163,6 +165,11 @@ pub async fn read_frame_length<R: AsyncReadExt + Unpin>(reader: &mut R) -> Resul
         return Err(anyhow::anyhow!("Read error: {}", e));
     }
     let len = u32::from_be_bytes(len_buf);
+
+    if len == 0 || len > MAX_FRAME_LENGTH {
+        return Err(anyhow::anyhow!("Invalid frame length: {}", len));
+    }
+
     Ok(len)
 }
 
@@ -297,7 +304,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     }
     buf_file.flush().await?;
 
-    let computed_hash = hex::encode(hasher.finalize());
+    let computed_hash = encode(hasher.finalize());
     if computed_hash != headers.file_hash {
         tokio::fs::remove_file(&file_path).await.ok();
         warn!(
@@ -316,14 +323,14 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         return Ok(());
     }
 
-    let hashed_file_key = hex::encode(Sha256::digest(headers.file_key.as_bytes()));
-    let metadata_file = MetadataFile {
+    let hashed_file_key = encode(Sha256::digest(headers.file_key.as_bytes()));
+    let metadata = MetadataFile {
         filename: headers.file_name,
         file_size: headers.file_size,
         file_hash: headers.file_hash,
         hashed_file_key,
     };
-    metadata_file.save_to_disk_async(&metadata_path).await?;
+    metadata.save_to_disk_async(&metadata_path).await?;
 
     SHARED_FILE_LOCK.remove(&headers.file_id);
 
@@ -404,9 +411,9 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let file_name = metadata.filename;
     let file_size = metadata.file_size;
     let file_hash = metadata.file_hash;
-    let hashed_file_key = hex::encode(Sha256::digest(headers.file_key.as_bytes()));
+    let file_key = encode(Sha256::digest(headers.file_key.as_bytes()));
 
-    if metadata.hashed_file_key != hashed_file_key {
+    if metadata.hashed_file_key != file_key {
         warn!("Invalid file key for file_id: {}", file_id);
         send_failed(
             writer,
@@ -430,7 +437,6 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         file_name,
         file_size,
         file_hash,
-        file_key: headers.file_key,
     }
     .serialize()?;
 
@@ -462,6 +468,8 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+/// Client function to upload a file: connect to server, send upload request, stream file data, handle responses and errors
+/// returns file ID on success, or error message on failure
 pub async fn upload_client(
     file_path: PathBuf,
     file_key: String,
@@ -488,7 +496,11 @@ pub async fn upload_client(
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true).ok();
 
-    println!("Starting upload: {} ({} bytes)", file_name, file_size);
+    println!(
+        "Starting upload: {} ({} mb)",
+        file_name,
+        file_size as f32 / (1024.0 * 1024.0)
+    );
 
     let file_hash = file_hasher_async(&file_path)
         .await
@@ -588,6 +600,8 @@ pub async fn upload_client(
     Ok(rsp.file_id)
 }
 
+/// Client function to download a file: connect to server, send download request, read file data, validate hash, save to disk, handle errors
+/// returns output file path on success, or error message on failure
 pub async fn download_client(
     file_id: &str,
     file_key: String,
@@ -634,8 +648,9 @@ pub async fn download_client(
     let response = DownloadResponse::deserialize(&header_bytes[1..])?;
 
     println!(
-        "Downloading: {} ({} bytes)",
-        response.file_name, response.file_size
+        "Downloading: {} ({} mb)",
+        response.file_name,
+        response.file_size as f32 / (1024.0 * 1024.0)
     );
 
     let pg_bar = ProgressBar::new(response.file_size);
@@ -673,7 +688,7 @@ pub async fn download_client(
     buf_file.flush().await?;
     pg_bar.finish_and_clear();
 
-    let computed_hash = hex::encode(hasher.finalize());
+    let computed_hash = encode(hasher.finalize());
     if computed_hash != response.file_hash {
         tokio::fs::remove_file(&output_path).await.ok();
         anyhow::bail!(

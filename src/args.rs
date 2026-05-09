@@ -5,8 +5,8 @@ use std::path::PathBuf;
 #[command(
     name = "r-drive",
     version = "1.0.0-gamma",
-    about = "r-drive; a super simple file storage and sharing with simple & secure protocol",
-    long_about = "r-drive; a super simple file storage and sharing with simple & secure protocol"
+    about = "r-drive; a simple file storage and sharing with secure protocol, backups, and versioning support",
+    long_about = "a fast and secure object storage server, uses CAS/layering like docker image hub and versioning & backups support"
 )]
 pub struct ServerArgs {
     #[command(subcommand)]
@@ -41,19 +41,6 @@ pub struct ClientArgs {
 
 #[derive(Subcommand)]
 pub enum ClientCommands {
-    /// User-specific operations, such as authentication, file management, etc.
-    User {
-        /// Create new user space
-        #[arg(short, long, conflicts_with_all = ["remove", "rotate"])]
-        add: Option<String>,
-        /// Remove  user space
-        #[arg(short, long, conflicts_with_all = ["add", "rotate"])]
-        remove: Option<String>,
-        /// Rotate user key for object access, requires decrypting/encrypting all metadata file (SLOW)
-        #[arg(short, long, conflicts_with_all = ["add", "remove"])]
-        rotate: Option<String>,
-    },
-
     /// Upload a file to the server
     Push {
         /// Path to the file to upload
@@ -117,6 +104,7 @@ pub enum ClientCommands {
         protocol: String,
     },
 
+    // TODO: Not implement, skill issues
     /// Stream a file to other clients via Zero-copy P2P
     Serve {
         /// Path to the file to send over
@@ -132,6 +120,7 @@ pub enum ClientCommands {
         port: u16,
     },
 
+    // TODO: Not implement, skill issues
     /// Get a stream file and write to disk, similar to `pull` but with zero-copy P2P,
     /// so it can be used for large files without consuming much memory
     Listen {

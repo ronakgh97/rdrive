@@ -1,5 +1,6 @@
-use crate::crypto::{decrypt_data, encrypt_data, generate_master_key};
+use crate::crypto::{decrypt_data, encrypt_data};
 use anyhow::Result;
+use chrono::Local;
 use colored::Colorize;
 use dashmap::DashMap;
 use hex::decode;
@@ -62,6 +63,11 @@ pub async fn file_hasher_async(path: &Path) -> Result<String> {
     tokio::task::spawn_blocking(move || file_hasher(&path)).await?
 }
 
+// TODO: THIS NEED A SERIOUS REFACTOR
+//  I'M DITCHING TYPICAL CORPORATE AUTH SLOP, THIS GOING TO BE DECENTRALIZED, FILE_SYSTEM AS PLAYGROUND
+//  Every file will go to either ~/.rdrive/storage/<file_key_hash + salt + timestamp>/<file-id> or
+//  ~/.rdrive/storage/<public>/<file-id>, THATS FUCK IT!!!!
+
 #[derive(Deserialize, Serialize)]
 pub struct MetadataFile {
     filename: String,
@@ -74,7 +80,7 @@ impl MetadataFile {
     pub fn read_from_disk(path: &PathBuf) -> Result<Self> {
         use postcard::from_bytes;
 
-        let key = MASTER_KEY.get_or_init(generate_master_key).clone();
+        let key = MASTER_KEY.clone();
         let key_bytes = decode(key)?;
 
         let deserialized = std::fs::read(path)?;
@@ -92,7 +98,7 @@ impl MetadataFile {
     pub fn save_to_disk(&self, path: &PathBuf) -> Result<()> {
         use postcard::to_allocvec;
 
-        let key = MASTER_KEY.get_or_init(generate_master_key).clone();
+        let key = MASTER_KEY.clone();
         let key_bytes = decode(key)?;
 
         let serialized = to_allocvec(self)?;
@@ -138,22 +144,23 @@ impl Catalog {
         Ok(())
     }
 
+    #[inline]
     pub async fn update_on_push(
         &mut self,
         path: &PathBuf,
         file_name: &str,
         file_id: &str,
     ) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         self.file_map
             .entry(file_id.to_string())
             .and_modify(|meta| {
-                meta.last_push = now.clone();
+                meta.last_push = timestamp.clone();
             })
             .or_insert_with(|| FileInfo {
                 name: file_name.to_string(),
-                last_push: now.clone(),
+                last_push: timestamp.clone(),
                 last_pull: "never".to_string(),
             });
         self.file_index
@@ -169,9 +176,10 @@ impl Catalog {
 
         Ok(())
     }
+    #[inline]
     pub async fn update_on_pull(&mut self, path: &PathBuf, file_id: &str) -> Result<()> {
         if let Some(meta) = self.file_map.get_mut(file_id) {
-            meta.last_pull = chrono::Utc::now().to_rfc3339();
+            meta.last_pull = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         }
         self.write(path).await?;
 
@@ -179,10 +187,13 @@ impl Catalog {
     }
 }
 
-pub static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
+pub static START_TIME: OnceLock<chrono::DateTime<Local>> = OnceLock::new();
 pub static SHARED_FILE_LOCK: LazyLock<Arc<DashMap<String, String>>> =
     LazyLock::new(|| Arc::new(DashMap::new()));
-pub static MASTER_KEY: OnceLock<String> = OnceLock::new();
+pub static MASTER_KEY: LazyLock<String> = LazyLock::new(|| {
+    dotenv::dotenv().ok();
+    std::env::var("MASTER_KEY").expect("MASTER_KEY environment variable must be set for encryption")
+});
 pub static MAX_CONNECTIONS: OnceLock<usize> = OnceLock::new();
 pub static MAX_FILE_SIZE: LazyLock<u64> = LazyLock::new(|| {
     std::env::var("MAX_FILE_SIZE")
@@ -224,17 +235,12 @@ impl Default for Tracker {
 #[inline]
 pub fn try_get_uptime_hrs() -> f64 {
     if let Some(start_time) = START_TIME.get() {
-        let now = chrono::Local::now();
+        let now = Local::now();
         let duration = now.signed_duration_since(*start_time);
         duration.num_hours() as f64
     } else {
         0.0
     }
-}
-
-#[inline]
-pub fn try_get_master_key() -> Option<String> {
-    MASTER_KEY.get().cloned()
 }
 
 pub fn ascii_art() {

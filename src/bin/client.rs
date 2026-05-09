@@ -59,37 +59,38 @@ async fn main() -> Result<()> {
                 Catalog::default()
             };
 
-            let file_id = if let Some(uuids) = catalog.file_index.get(&file_name) {
-                // TODO: Changed to selection based
-                let tracked_uuid = uuids
-                    .last()
-                    .ok_or_else(|| anyhow::anyhow!("Corrupted file index"))?;
-
-                for (i, uuid) in uuids.iter().enumerate() {
+            let file_id = if let Some(tracked) = catalog.file_index.get(&file_name) {
+                for (i, uuid) in tracked.iter().enumerate() {
                     let info = catalog
                         .file_map
                         .get(uuid)
-                        .ok_or_else(|| anyhow::anyhow!("Corrupted file map"))?;
+                        .ok_or_else(|| anyhow::anyhow!("Couldn't find in file map {}", uuid))?;
                     println!(
-                        "{} | {} Last pushed [{}] | Last pulled [{}]",
+                        "{} {} | pushed ({}) | pulled ({})",
                         i + 1,
                         uuid.yellow(),
                         info.last_push,
                         info.last_pull
                     );
                 }
-                print!("File already exists, Overwrite latest [y/n]?: ");
+                print!("File already exists, overwrite? [N/0]: ");
 
-                let input = {
+                let input: usize = {
                     io::Write::flush(&mut io::stdout())?;
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;
-                    input.trim().to_lowercase()
+                    input
+                        .trim()
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("Invalid input, expected a number"))?
                 };
-                if input.eq_ignore_ascii_case("y") {
-                    tracked_uuid.clone()
-                } else {
-                    Uuid::new_v4().simple().to_string()
+                match input {
+                    0 => Uuid::new_v4().simple().to_string(),
+                    n if n <= tracked.len() => tracked[n - 1].clone(),
+                    _ => {
+                        eprintln!("Invalid input, number out of range");
+                        std::process::exit(1);
+                    }
                 }
             } else {
                 Uuid::new_v4().simple().to_string()
@@ -146,13 +147,7 @@ async fn main() -> Result<()> {
 
             match protocol.as_str() {
                 "v1" => {
-                    let downloaded_path =
-                        download_file_v1(&file_id, file_key, dir, &address, port).await?;
-                    let _file_name = downloaded_path
-                        .file_name()
-                        .ok_or_else(|| anyhow::anyhow!("Invalid downloaded file name"))?
-                        .to_string_lossy()
-                        .to_string();
+                    download_file_v1(&file_id, file_key, dir, &address, port).await?;
 
                     let catalog_path = get_catalog_path()?;
 
@@ -177,7 +172,17 @@ async fn main() -> Result<()> {
             todo!("Non-trivial to implement this feature")
         }
         Some(ClientCommands::Ls { .. }) => {
-            list_file_map().await?;
+            let file_map = Catalog::read(&get_catalog_path()?).await?;
+
+            for (id, file) in file_map.file_map {
+                println!(
+                    " {} | {} | {} | {} ",
+                    id.yellow(),
+                    file.name.cyan(),
+                    file.last_push,
+                    file.last_pull
+                );
+            }
         }
         Some(ClientCommands::Status {
             port,
@@ -203,49 +208,10 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         },
-        // TODO: Freeze this, fuck this
-        Some(ClientCommands::User {
-            add,
-            remove,
-            rotate,
-        }) => {
-            if let Some(_add) = add {
-                // handle add and return
-            }
-            if let Some(_remove) = remove {
-                // handle remove and return
-            }
-            if let Some(_rotate) = rotate {
-                // handle rotate and return
-            }
-        }
         None => {
             ascii_art();
         }
     }
 
     Ok(())
-}
-
-async fn list_file_map() -> Result<()> {
-    let file_map = Catalog::read(&get_catalog_path()?).await?;
-
-    for (id, obj) in file_map.file_map {
-        println!("  {} - {}", id.yellow(), obj.name.cyan());
-    }
-
-    Ok(())
-}
-
-#[allow(unused)]
-fn user_prompt(msg: &str) -> Result<String> {
-    print!("{}", msg);
-    io::Write::flush(&mut io::stdout())?;
-    let mut id = String::new();
-    io::stdin().read_line(&mut id)?;
-    if id.trim().is_empty() {
-        eprintln!("File ID cannot be empty");
-        std::process::exit(1);
-    }
-    Ok(id.trim().to_string())
 }

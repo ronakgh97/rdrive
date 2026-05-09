@@ -9,5 +9,3 @@ chmod -R 755 /home/rdrive/.rdrive
 # shellcheck disable=SC2145
 echo "Starting r-drive with args: $@"
 exec /app/rdrive-server "$@"
-
-

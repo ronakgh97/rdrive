@@ -1,9 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use r_drive::args::{ServerArgs, ServerCommands};
-use r_drive::crypto::generate_master_key;
+use r_drive::ascii_art;
 use r_drive::service::serve_tcp;
-use r_drive::{MASTER_KEY, ascii_art};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 24)]
 async fn main() -> Result<()> {
@@ -12,12 +11,10 @@ async fn main() -> Result<()> {
     match args.command {
         Some(ServerCommands::Serve { port, protocol }) => match protocol.as_str() {
             "v1" => {
-                MASTER_KEY.get_or_init(generate_master_key);
                 serve_tcp(Some(port)).await?;
             }
             "v2" => {
                 println!("WIP: UDP protocol is not implemented yet, falling back to TCP");
-                MASTER_KEY.get_or_init(generate_master_key);
                 serve_tcp(Some(port)).await?;
             }
             _ => {

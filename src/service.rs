@@ -1,5 +1,5 @@
 use crate::protocol_v1::start_tcp_server;
-use crate::{MASTER_KEY, MAX_CONNECTIONS, get_storage_path};
+use crate::{MAX_CONNECTIONS, get_storage_path};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,10 +19,6 @@ pub async fn serve_tcp(port: Option<u16>) -> Result<()> {
 /// Init necessary env and returns port and connection limit
 async fn server_init(port: Option<u16>) -> Result<(u16, usize)> {
     dotenv::dotenv().ok();
-
-    let master_key = std::env::var("MASTER_KEY").unwrap_or_else(|_| crate::generate_master_key());
-
-    MASTER_KEY.get_or_init(move || master_key);
 
     let max_connection: usize = std::env::var("MAX_CONNECTIONS")
         .ok()
