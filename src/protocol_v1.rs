@@ -4,8 +4,8 @@ use crate::header::{
 };
 use crate::{
     ACTIVE_CONNECTIONS, MAX_CONNECTIONS, MetadataFile, NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER,
-    READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER, SHARED_FILE_LOCK, START_TIME, WRITE_TIMEOUT,
-    debug, error, file_hasher_async, info, trace, try_get_uptime_hrs, warn,
+    READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER, START_TIME, WRITE_TIMEOUT, debug, error,
+    file_hasher_async, get_file_lock, info, release_file_lock, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -259,13 +259,30 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     time_start: Instant,
     storage_path: &Path,
 ) -> Result<()> {
+    let file_id = headers.file_id.clone();
+    let file_lock = get_file_lock(&file_id);
+
+    let _guard = match file_lock.try_write() {
+        Ok(guard) => guard,
+        Err(_) => {
+            send_failed(
+                writer,
+                ErrorHeader {
+                    code: 409,
+                    message: "File is currently locked by another operation".to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
     let hashed_file_key = encode(Sha256::digest(headers.file_key.as_bytes()));
 
     let dir_path = storage_path.join(&hashed_file_key);
     let file_path = dir_path.join(format!("{}.file", &headers.file_id));
     let metadata_path = dir_path.join(format!("{}.meta", &headers.file_id));
 
-    // TODO: For layering implement we have to <file-id> dir inside <hash_file_key> dir
     tokio::fs::create_dir_all(&dir_path).await?;
 
     info!(
@@ -274,8 +291,6 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         headers.file_size,
         headers.file_hash[..8].dimmed()
     );
-
-    SHARED_FILE_LOCK.insert(headers.file_id.clone(), "".to_string());
 
     // Send ACK
     timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??;
@@ -307,7 +322,6 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
             "Hash mismatch: expected {} but computed {}",
             &headers.file_hash, computed_hash
         );
-        SHARED_FILE_LOCK.remove(&headers.file_id);
         send_failed(
             writer,
             ErrorHeader {
@@ -327,8 +341,6 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     };
     metadata.save_to_disk_async(&metadata_path).await?;
 
-    SHARED_FILE_LOCK.remove(&headers.file_id);
-
     let time_took = time_start.elapsed().as_secs_f32();
     info!(
         "Upload complete: File-ID: {} Time_taken: {}sec",
@@ -344,9 +356,13 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     )
     .await?;
 
+    drop(_guard);
+    release_file_lock(&file_id);
+
     let mut lock = SERVER_TRACKER.write().await;
     lock.total_bandwidth_gb += headers.file_size as f64 / (1024.0 * 1024.0 * 1024.0);
     lock.total_uploaded += 1;
+
     Ok(())
 }
 
@@ -357,17 +373,23 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     headers: DownloadHeader,
     storage_path: &Path,
 ) -> Result<()> {
-    if SHARED_FILE_LOCK.contains_key(&headers.file_id) {
-        send_failed(
-            writer,
-            ErrorHeader {
-                code: 409,
-                message: "File is currently being uploaded, please try again later".to_string(),
-            },
-        )
-        .await?;
-        return Ok(());
-    }
+    let file_id = headers.file_id.clone();
+    let file_lock = get_file_lock(&file_id);
+
+    let _guard = match file_lock.try_read() {
+        Ok(guard) => guard,
+        Err(_) => {
+            send_failed(
+                writer,
+                ErrorHeader {
+                    code: 409,
+                    message: "File is currently being uploaded or modified".to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
 
     let hashed_file_key = encode(Sha256::digest(headers.file_key.as_bytes()));
 
@@ -458,9 +480,13 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     info!("Download complete: File-ID: {}", &headers.file_id.dimmed());
 
+    drop(_guard);
+    release_file_lock(&file_id);
+
     let mut lock = SERVER_TRACKER.write().await;
     lock.total_bandwidth_gb += file_size as f64 / (1024.0 * 1024.0 * 1024.0);
     lock.total_download += 1;
+
     Ok(())
 }
 

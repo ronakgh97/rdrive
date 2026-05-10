@@ -36,7 +36,7 @@ pub struct LayerMeta {
 }
 
 /// Reads a file in chunks of `LAYER_SIZE`, creates layer metadata and does NOT store the actual data in memory
-pub async fn read_file_layers(mut buf_reader: BufReader<File>) -> Result<Vec<LayerMeta>> {
+pub async fn read_file_layer(mut buf_reader: BufReader<File>) -> Result<Vec<LayerMeta>> {
     let mut layers_meta = Vec::with_capacity(8);
     let mut mem_offset = 0usize;
 
@@ -88,6 +88,56 @@ pub async fn read_data_layer(
         data: buffer,
         layer_meta: LayerMeta { hash, mem_offset },
     }))
+}
+
+#[tokio::test]
+async fn test_layering() {
+    use crate::file_hasher_async;
+    use rand::Rng;
+
+    let mut rng = rand::rng();
+    let mut file1 = vec![0u8; 256 * 1024 * 1024];
+    rng.fill_bytes(&mut file1);
+
+    // changed a small portion in file1 to create file2
+    let mut file2 = file1.clone();
+
+    file2
+        .iter_mut()
+        .take(1024)
+        .for_each(|b| *b = b.wrapping_add(1));
+
+    tokio::fs::write("old.tmp", file1).await.unwrap();
+    tokio::fs::write("new.tmp", file2).await.unwrap();
+
+    let buf_file = BufReader::new(File::open("old.tmp").await.unwrap());
+    let old_layers_meta = read_file_layer(buf_file).await.unwrap();
+    println!(
+        "Hash of old file: {}",
+        file_hasher_async("old.tmp".as_ref()).await.unwrap()
+    );
+    println!("Layer metadata of old.tmp:");
+    for layer in old_layers_meta.iter() {
+        println!("hash={}, offset={}", layer.hash, layer.mem_offset);
+    }
+
+    assert!(!old_layers_meta.is_empty());
+
+    let buf_file = BufReader::new(File::open("new.tmp").await.unwrap());
+    let new_layers_meta = read_file_layer(buf_file).await.unwrap();
+    println!(
+        "Hash of old file: {}",
+        file_hasher_async("new.tmp".as_ref()).await.unwrap()
+    );
+    println!("Layer metadata of new.tmp:");
+    for layer in new_layers_meta.iter() {
+        println!("hash={}, offset={}", layer.hash, layer.mem_offset);
+    }
+
+    assert!(!new_layers_meta.is_empty());
+
+    tokio::fs::remove_file("old.tmp").await.unwrap();
+    tokio::fs::remove_file("new.tmp").await.unwrap();
 }
 
 /// Reads a file in chunks of `LAYER_SIZE`, creates layers with their hash and offset
@@ -198,14 +248,13 @@ async fn experimental_layer_test() {
 
     let buf_file = BufReader::new(File::open("old.bin").await.unwrap());
     let old_hash = file_hasher_async("old.bin".as_ref()).await.unwrap();
-    println!("hash of old file: {}", old_hash);
+    println!("Hash of old file: {}", old_hash);
     let mut old_layers = to_layers(buf_file).await.unwrap();
 
-    println!("hash of old layers:");
-    for (i, layer) in old_layers.iter().enumerate() {
+    println!("Hash of old layers:");
+    for layer in old_layers.iter() {
         println!(
-            "Layer {}: hash={}, offset={}, size={}",
-            i,
+            "hash={}, offset={}, size={}",
             layer.layer_meta.hash,
             layer.layer_meta.mem_offset,
             layer.data.len()
@@ -221,14 +270,13 @@ async fn experimental_layer_test() {
         file_data.len()
     );
 
-    //from_layer test
     from_layers(&mut old_layers, "reconstructed.bin".as_ref())
         .await
         .unwrap();
     let reconstructed_hash = file_hasher_async("reconstructed.bin".as_ref())
         .await
         .unwrap();
-    println!("hash of reconstructed file: {}", reconstructed_hash);
+    println!("Hash of reconstructed old file: {}", reconstructed_hash);
     assert_eq!(old_hash, reconstructed_hash);
 
     tokio::fs::remove_file("reconstructed.bin").await.unwrap();
@@ -239,11 +287,10 @@ async fn experimental_layer_test() {
     let buf_file = BufReader::new(File::open("new.bin").await.unwrap());
     let new_layers = to_layers(buf_file).await.unwrap();
 
-    println!("hash of new layers:");
-    for (i, layer) in new_layers.iter().enumerate() {
+    println!("Hash of new layers:");
+    for layer in new_layers.iter() {
         println!(
-            "Layer {}: hash={}, offset={}, size={}",
-            i,
+            "hash={}, offset={}, size={}",
             layer.layer_meta.hash,
             layer.layer_meta.mem_offset,
             layer.data.len()
@@ -253,10 +300,9 @@ async fn experimental_layer_test() {
     let changed_layers = compare_layers(old_layers, &new_layers).unwrap();
 
     println!("Changed layers:");
-    for (i, layer) in changed_layers.iter().enumerate() {
+    for layer in changed_layers.iter() {
         println!(
-            "Layer {}: hash={}, offset={}, size={}",
-            i,
+            "hash={}, offset={}, size={}",
             layer.layer_meta.hash,
             layer.layer_meta.mem_offset,
             layer.data.len()

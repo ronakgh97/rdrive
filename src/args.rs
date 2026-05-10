@@ -107,6 +107,9 @@ pub enum ClientCommands {
         protocol: String,
     },
 
+    /// List local file map & other info
+    Ls {},
+
     // TODO: Not implement, skill issues
     /// Stream a file to other clients via Zero-copy P2P
     Serve {
@@ -143,7 +146,4 @@ pub enum ClientCommands {
         #[arg(short, long)]
         port: u16,
     },
-
-    /// List local file map
-    Ls {},
 }

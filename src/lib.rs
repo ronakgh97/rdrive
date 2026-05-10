@@ -215,8 +215,23 @@ pub static MAX_FILE_SIZE: LazyLock<u64> = LazyLock::new(|| {
         .unwrap_or(8 * 1024 * 1024 * 1024) // 8 GB default
 });
 
-pub static SHARED_FILE_LOCK: LazyLock<Arc<DashMap<String, String>>> =
+pub static SHARED_FILE_LOCK: LazyLock<Arc<DashMap<String, Arc<RwLock<()>>>>> =
     LazyLock::new(|| Arc::new(DashMap::new()));
+
+#[inline(always)]
+pub fn get_file_lock(file_id: &str) -> Arc<RwLock<()>> {
+    let map = &*SHARED_FILE_LOCK;
+    map.entry(file_id.to_string())
+        .or_insert_with(|| Arc::new(RwLock::new(())))
+        .clone()
+}
+
+#[inline(always)]
+pub fn release_file_lock(file_id: &str) {
+    let map = &*SHARED_FILE_LOCK;
+    map.remove(file_id);
+}
+
 pub static MASTER_KEY: LazyLock<String> = LazyLock::new(|| {
     dotenv::dotenv().ok();
     std::env::var("MASTER_KEY").expect("MASTER_KEY environment variable must be set for encryption")
@@ -248,6 +263,20 @@ impl Default for Tracker {
             total_download: 0,
             total_bandwidth_gb: 0.0,
         }
+    }
+}
+
+impl Tracker {
+    pub async fn log_upload(&mut self, bytes: usize) {
+        let mut lock = SERVER_TRACKER.write().await;
+        lock.total_bandwidth_gb += bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        lock.total_uploaded += 1;
+    }
+
+    pub async fn log_download(&mut self, bytes: usize) {
+        let mut lock = SERVER_TRACKER.write().await;
+        lock.total_bandwidth_gb += bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        lock.total_uploaded += 1;
     }
 }
 

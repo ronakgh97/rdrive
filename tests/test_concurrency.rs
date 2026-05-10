@@ -14,7 +14,7 @@ use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, JoinSet};
 use uuid::Uuid;
 
-pub const GARBAGE_SIZE: usize = 32 * 1024 * 1024;
+pub const TEST_FILE_SIZE: usize = 32 * 1024 * 1024;
 
 static SHARED_TRACKER: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -205,7 +205,7 @@ async fn snapshot_tracker() -> (usize, usize, f64) {
     )
 }
 
-async fn wait_for_tracker_metrics(
+async fn wait_check_tracker_metrics(
     base_up: usize,
     base_down: usize,
     base_bw: f64,
@@ -275,7 +275,7 @@ async fn test_concurrency_v1() {
     let mut tasks = JoinSet::new();
 
     for i in 0..num_clients {
-        let mut payload = vec![0u8; GARBAGE_SIZE];
+        let mut payload = vec![0u8; TEST_FILE_SIZE];
         tasks.spawn(async move {
             rand::rng().fill_bytes(&mut payload);
             let filename = format!("v1_test_file_{}.bin", i);
@@ -296,8 +296,8 @@ async fn test_concurrency_v1() {
         result.unwrap();
     }
 
-    let expected_bw = 2.0 * num_clients as f64 * GARBAGE_SIZE as f64 / (1024.0 * 1024.0 * 1024.0);
-    wait_for_tracker_metrics(
+    let expected_bw = 2.0 * num_clients as f64 * TEST_FILE_SIZE as f64 / (1024.0 * 1024.0 * 1024.0);
+    wait_check_tracker_metrics(
         base_up,
         base_down,
         base_bw,
