@@ -4,8 +4,9 @@ use crate::header::{
 };
 use crate::{
     ACTIVE_CONNECTIONS, MAX_CONNECTIONS, MetadataFile, NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER,
-    READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER, START_TIME, WRITE_TIMEOUT, debug, error,
-    file_hasher_async, get_file_lock, info, release_file_lock, trace, try_get_uptime_hrs, warn,
+    READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER, START_TIME, Tracker, WRITE_TIMEOUT, debug,
+    error, file_hasher_async, get_file_lock, info, release_file_lock, trace, try_get_uptime_hrs,
+    warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -359,9 +360,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     drop(_guard);
     release_file_lock(&file_id);
 
-    let mut lock = SERVER_TRACKER.write().await;
-    lock.total_bandwidth_gb += headers.file_size as f64 / (1024.0 * 1024.0 * 1024.0);
-    lock.total_uploaded += 1;
+    Tracker::log_upload(headers.file_size as usize).await;
 
     Ok(())
 }
@@ -483,9 +482,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     drop(_guard);
     release_file_lock(&file_id);
 
-    let mut lock = SERVER_TRACKER.write().await;
-    lock.total_bandwidth_gb += file_size as f64 / (1024.0 * 1024.0 * 1024.0);
-    lock.total_download += 1;
+    Tracker::log_download(file_size as usize).await;
 
     Ok(())
 }

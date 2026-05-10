@@ -165,6 +165,9 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Some(ClientCommands::Backup { .. }) => {
+            todo!("WIP backup feature")
+        }
         Some(ClientCommands::Serve { .. }) => {
             todo!("Non-trivial to implement this feature")
         }

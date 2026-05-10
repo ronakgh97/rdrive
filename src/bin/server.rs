@@ -9,7 +9,6 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-#[inline(always)]
 #[allow(unused)]
 fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
     let mut tmp = target.to_path_buf();

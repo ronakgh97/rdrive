@@ -267,16 +267,16 @@ impl Default for Tracker {
 }
 
 impl Tracker {
-    pub async fn log_upload(&mut self, bytes: usize) {
+    pub async fn log_upload(bytes: usize) {
         let mut lock = SERVER_TRACKER.write().await;
         lock.total_bandwidth_gb += bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         lock.total_uploaded += 1;
     }
 
-    pub async fn log_download(&mut self, bytes: usize) {
+    pub async fn log_download(bytes: usize) {
         let mut lock = SERVER_TRACKER.write().await;
         lock.total_bandwidth_gb += bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        lock.total_uploaded += 1;
+        lock.total_download += 1;
     }
 }
 

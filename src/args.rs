@@ -85,13 +85,32 @@ pub enum ClientCommands {
         #[arg(long, default_value = "v1")]
         protocol: String,
 
-        /// Lock the file with a key, this arg can be used in CI (default is input prompt)
-        #[arg(long)]
-        file_key: Option<String>,
-
         /// File ID to download, if not provided, it will be prompted in the terminal
         #[arg(short, long)]
         file_id: Option<String>,
+
+        /// Unlock the file with a key, this arg can be used in CI (default is input prompt)
+        #[arg(long)]
+        file_key: Option<String>,
+    },
+
+    /// Create backup for a file on the server
+    Backup {
+        /// File ID to back up, if not provided, it will be prompted in the terminal
+        #[arg(short, long)]
+        file_id: String,
+
+        /// Unlock the file with a key, this arg can be used in CI (default is input prompt)
+        #[arg(long)]
+        file_key: Option<String>,
+
+        /// Address of the server to connect to (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        address: String,
+
+        /// Port to connect to the server (default: 3000)
+        #[arg(long, default_value = "3000")]
+        port: u16,
     },
 
     /// Get Status of remote server
