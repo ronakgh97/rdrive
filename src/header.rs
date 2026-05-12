@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub enum Command {
+    Init(u8), // flags -> 1/2 = new/rotate
     Upload(UploadHeader),
     Download(DownloadHeader),
     Status,
@@ -17,6 +18,82 @@ impl Command {
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
         postcard::from_bytes(bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize Command: {}", e))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NewKeyHeader {
+    pub signature: String,
+    pub new_public_pem: String,
+}
+
+impl NewKeyHeader {
+    #[inline(always)]
+    pub fn validate_signature(&self, nonce: &[u8]) -> Result<()> {
+        use ed25519_dalek::pkcs8::DecodePublicKey;
+        use ed25519_dalek::{Verifier, VerifyingKey};
+
+        let signature_bytes = hex::decode(&self.signature)
+            .map_err(|e| anyhow::anyhow!("Failed to decode signature from hex: {}", e))?;
+        let signature = ed25519_dalek::Signature::try_from(&signature_bytes[..])
+            .map_err(|e| anyhow::anyhow!("Failed to parse signature: {}", e))?;
+
+        let public_key = VerifyingKey::from_public_key_pem(&self.new_public_pem)
+            .map_err(|e| anyhow::anyhow!("Failed to decode public key from PEM: {}", e))?;
+
+        public_key
+            .verify(nonce, &signature)
+            .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
+
+        Ok(())
+    }
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        postcard::to_allocvec(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize InitHeader: {}", e))
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<Self> {
+        postcard::from_bytes(data)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize InitHeader: {}", e))
+    }
+}
+
+// TODO; update white-list in the process
+#[derive(Serialize, Deserialize)]
+pub struct RotateKeyHeader {
+    pub signature: String,
+    pub old_public_pem: String,
+    pub new_public_pem: String,
+}
+
+impl RotateKeyHeader {
+    #[inline(always)]
+    pub fn validate_signature(&self, nonce: &[u8]) -> Result<()> {
+        use ed25519_dalek::pkcs8::DecodePublicKey;
+        use ed25519_dalek::{Verifier, VerifyingKey};
+
+        let signature_bytes = hex::decode(&self.signature)
+            .map_err(|e| anyhow::anyhow!("Failed to decode signature from hex: {}", e))?;
+        let signature = ed25519_dalek::Signature::try_from(&signature_bytes[..])
+            .map_err(|e| anyhow::anyhow!("Failed to parse signature: {}", e))?;
+
+        let public_key = VerifyingKey::from_public_key_pem(&self.new_public_pem)
+            .map_err(|e| anyhow::anyhow!("Failed to decode public key from PEM: {}", e))?;
+
+        public_key
+            .verify(nonce, &signature)
+            .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
+
+        Ok(())
+    }
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        postcard::to_allocvec(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize RotateKeyHeader: {}", e))
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<Self> {
+        postcard::from_bytes(data)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize RotateKeyHeader: {}", e))
     }
 }
 

@@ -28,8 +28,6 @@ Downloading: dummy.bin (578.9375 mb)
 Saved to: .\dummy.bin
 ```
 
-> Concurrent downloads are not supported yet (Non-trivial)
-
 layering/CAS (WIP)
 
 ```shell

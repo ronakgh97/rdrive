@@ -1,15 +1,18 @@
+use crate::crypto::generate_ed25519_keypair;
+use crate::header::Command::Init;
 use crate::header::{
-    Command, DownloadHeader, DownloadResponse, ErrorHeader, StatusHeader, UploadHeader,
-    UploadResponse,
+    Command, DownloadHeader, DownloadResponse, ErrorHeader, NewKeyHeader, RotateKeyHeader,
+    StatusHeader, UploadHeader, UploadResponse,
 };
 use crate::{
     ACTIVE_CONNECTIONS, MAX_CONNECTIONS, MetadataFile, NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER,
     READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER, START_TIME, Tracker, WRITE_TIMEOUT, debug,
-    error, file_hasher_async, get_file_lock, info, release_file_lock, trace, try_get_uptime_hrs,
-    warn,
+    error, file_hasher_async, get_file_lock, get_storage_path, get_user_path, info,
+    release_file_lock, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
+use ed25519_dalek::{VerifyingKey, pkcs8::DecodePublicKey};
 use hex::encode;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
@@ -94,6 +97,12 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
         }
     };
     match command {
+        Init(flags) => {
+            debug!("Received INIT request");
+            handle_keys(&mut reader, &mut writer, flags).await?;
+            writer.flush().await?;
+            Ok(())
+        }
         Command::Upload(header) => {
             debug!("Received UPLOAD request");
 
@@ -252,6 +261,111 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
     Ok(())
 }
 
+// Handle key registration and rotation: send nonce challenge, verify signature, create/rename user directory, send ACK or error response
+async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+    flag: u8,
+) -> Result<()> {
+    use rand::Rng;
+    let mut nonce = vec![0u8; 2048];
+    rand::rng().fill_bytes(&mut nonce);
+
+    // send nonce challenge to client for signature verification, FIRST
+    timeout(WRITE_TIMEOUT, write_frame(writer, &nonce)).await??;
+
+    // read key header and do the thing
+    let len = read_frame_length(reader).await? as usize;
+    let mut header_bytes = vec![0u8; len];
+    reader.read_exact(&mut header_bytes).await?;
+
+    // New key
+    if flag == 1 {
+        let key_header = NewKeyHeader::deserialize(&header_bytes)?;
+        match key_header.validate_signature(&nonce) {
+            Ok(_) => {
+                let public_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse public key from PEM: {}", e))?;
+
+                let pub_key_hash = encode(Sha256::digest(public_key.as_bytes()));
+                let user_dir = get_storage_path().await?.join(pub_key_hash);
+
+                tokio::fs::create_dir_all(&user_dir).await?;
+                timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??; // ACK
+            }
+            Err(e) => {
+                send_failed(
+                    writer,
+                    ErrorHeader {
+                        code: 401,
+                        message: format!("Invalid signature: {}", e),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+        // Rotate existing keys
+    } else if flag == 2 {
+        let key_header = RotateKeyHeader::deserialize(&header_bytes)?;
+        let old_pub_key = VerifyingKey::from_public_key_pem(&key_header.old_public_pem)
+            .map_err(|e| anyhow::anyhow!("Failed to parse old public key from PEM: {}", e))?;
+
+        let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
+        let user_path = get_storage_path().await?.join(old_pub_key_hash);
+
+        if !user_path.exists() {
+            send_failed(
+                writer,
+                ErrorHeader {
+                    code: 404,
+                    message: "User not registered, not found".to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+
+        match key_header.validate_signature(&nonce) {
+            Ok(_) => {
+                let new_pub_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to parse new public key from PEM: {}", e)
+                    })?;
+
+                let new_pub_key_hash = encode(Sha256::digest(new_pub_key.as_bytes()));
+                let new_user_path = get_storage_path().await?.join(new_pub_key_hash);
+
+                tokio::fs::rename(&user_path, &new_user_path).await?;
+                timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??; // ACK
+            }
+            Err(e) => {
+                send_failed(
+                    writer,
+                    ErrorHeader {
+                        code: 401,
+                        message: format!("Invalid signature: {}", e),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    } else {
+        send_failed(
+            writer,
+            ErrorHeader {
+                code: 400,
+                message: "Invalid flag value".to_string(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+
+    Ok(())
+}
+
 // Handle file upload: read file data, validate hash and size, save to disk, update metadata, send response
 async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
@@ -278,9 +392,9 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         }
     };
 
-    let hashed_file_key = encode(Sha256::digest(headers.file_key.as_bytes()));
+    let file_key_hash = encode(Sha256::digest(headers.file_key.as_bytes()));
 
-    let dir_path = storage_path.join(&hashed_file_key);
+    let dir_path = storage_path.join(&file_key_hash);
     let file_path = dir_path.join(format!("{}.file", &headers.file_id));
     let metadata_path = dir_path.join(format!("{}.meta", &headers.file_id));
 
@@ -338,7 +452,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         filename: headers.file_name,
         file_size: headers.file_size,
         file_hash: headers.file_hash,
-        hashed_file_key,
+        file_key_hash,
     };
     metadata.save_to_disk_async(&metadata_path).await?;
 
@@ -390,9 +504,9 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         }
     };
 
-    let hashed_file_key = encode(Sha256::digest(headers.file_key.as_bytes()));
+    let file_key_hash = encode(Sha256::digest(headers.file_key.as_bytes()));
 
-    let dir_path = storage_path.join(&hashed_file_key);
+    let dir_path = storage_path.join(&file_key_hash);
     if !dir_path.exists() {
         send_failed(
             writer,
@@ -485,6 +599,114 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     Tracker::log_download(file_size as usize).await;
 
     Ok(())
+}
+
+// TODO: Too many repetitive lazy code, very poor thinking, refactor later
+
+/// Client function to register a new public key or rotate existing keys: connect to server, perform nonce challenge, sign nonce, send key info, handle ACK or error response
+/// returns private, public key with PEM format
+pub async fn register_pubkey(host: &str, port: u16) -> Result<(String, String)> {
+    use ed25519_dalek::Signer;
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+
+    let private_key_path = get_user_path().await?.join("private_key.pem");
+    let public_key_path = get_user_path().await?.join("public_key.pem");
+
+    let (private_key, public_key) = generate_ed25519_keypair()?;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    let private_pem = private_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(|e| anyhow::anyhow!("Failed to encode private key to PEM: {}", e))?
+        .to_string();
+    let public_pem = public_key
+        .to_public_key_pem(LineEnding::LF)
+        .map_err(|e| anyhow::anyhow!("Failed to encode public key to PEM: {}", e))?;
+
+    let old_public_pem = if private_key_path.exists() && public_key_path.exists() {
+        Some(
+            tokio::fs::read_to_string(&public_key_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to read existing public key: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    let request = if old_public_pem.is_some() {
+        Init(2u8).serialize()?
+    } else {
+        Init(1u8).serialize()?
+    };
+
+    let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    stream.set_nodelay(true).ok();
+
+    let (reader, writer) = stream.split();
+    let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
+    let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
+    let len = (request.len() as u32).to_be_bytes();
+    writer.write_all(&len).await?;
+    writer.write_all(&request).await?;
+    writer.flush().await.context("Failed to flush request")?;
+
+    let mut len_buf = [0u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .context("Failed to read response length")?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut nonce = vec![0u8; len];
+    reader
+        .read_exact(&mut nonce)
+        .await
+        .context("Failed to read response")?;
+
+    let signature = private_key.sign(&nonce);
+    let header_bytes = if let Some(old_pem) = old_public_pem {
+        let header = RotateKeyHeader {
+            signature: encode(signature.to_bytes()),
+            old_public_pem: old_pem,
+            new_public_pem: public_pem.clone(),
+        };
+        header.serialize()?
+    } else {
+        let header = NewKeyHeader {
+            signature: encode(signature.to_bytes()),
+            new_public_pem: public_pem.clone(),
+        };
+        header.serialize()?
+    };
+
+    let len = (header_bytes.len() as u32).to_be_bytes();
+    writer.write_all(&len).await?;
+    writer.write_all(&header_bytes).await?;
+    writer.flush().await?;
+
+    let mut len_buf = [0u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .context("Failed to read response length")?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut rsp = vec![0u8; len];
+    reader
+        .read_exact(&mut rsp)
+        .await
+        .context("Failed to read response")?;
+
+    // Reading flag for ACK or error
+    if rsp[0] == 0x1u8 {
+        println!("Registered successfully");
+    } else if rsp[0] == 0x2u8 {
+        let err = ErrorHeader::deserialize(&rsp[1..])?;
+        anyhow::bail!("Registration failed: {} - {}", err.code, err.message);
+    } else {
+        anyhow::bail!("Registration failed: Unknown reason");
+    }
+
+    Ok((private_pem, public_pem))
 }
 
 /// Client function to upload a file: connect to server, send upload request, stream file data, handle responses and errors

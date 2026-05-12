@@ -3,9 +3,10 @@ use clap::Parser;
 use colored::Colorize;
 use r_drive::args::{ClientArgs, ClientCommands};
 use r_drive::protocol_v1::{
-    download_client as download_file_v1, get_server_status, upload_client as upload_file_v1,
+    download_client as download_file_v1, get_server_status, register_pubkey,
+    upload_client as upload_file_v1,
 };
-use r_drive::{Catalog, ascii_art, get_catalog_path};
+use r_drive::{Catalog, ascii_art, get_catalog_path, get_user_path};
 use std::io;
 use uuid::Uuid;
 
@@ -14,6 +15,15 @@ async fn main() -> Result<()> {
     let args = ClientArgs::parse();
 
     match args.command {
+        Some(ClientCommands::Init { address, port }) => {
+            let user_path = get_user_path().await?;
+
+            let (private_pem, public_pem) = register_pubkey(&address, port).await?;
+
+            std::fs::create_dir_all(&user_path)?;
+            std::fs::write(user_path.join("private_key.pem"), &private_pem)?;
+            std::fs::write(user_path.join("public_key.pem"), &public_pem)?;
+        }
         Some(ClientCommands::Push {
             file,
             address,

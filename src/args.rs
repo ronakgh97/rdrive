@@ -25,7 +25,7 @@ pub enum ServerCommands {
         #[arg(long, default_value = "v1")]
         protocol: String,
     },
-    /// Rotate MASTER_KEY locally, (can be slow for 'obvious reason')
+    /// Rotate ENV keys locally, (can be slow for 'obvious reason')
     Rotate {},
 }
 
@@ -43,7 +43,18 @@ pub struct ClientArgs {
 
 #[derive(Subcommand)]
 pub enum ClientCommands {
-    // TODO: Tiny auth layer can be implement using Master Key + Timestamp Hashing for Ephemeral Keys
+    /// Derive ED25519 key pair locally and register with the server,
+    /// this is required before any push/pull operations
+    Init {
+        /// Address of the server to connect to (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        address: String,
+
+        /// Port to connect to the server (default: 3000)
+        #[arg(long, default_value = "3000")]
+        port: u16,
+    },
+
     /// Upload a file to the server
     Push {
         /// Path to the file to upload

@@ -46,6 +46,7 @@ indicatif = "0.18.4"
 rand = "0.10.1"
 postcard = { version = "1.1.3", features = ["alloc", "use-std"] }
 aes = "0.9.0"
+ed25519-dalek = { version = "3.0.0-pre.7", features = ["rand_core", "pem", "pkcs8"] }
 # zstd = "0.13.3"
 # tar = "0.4.45"
 # ahash = "0.8.12"

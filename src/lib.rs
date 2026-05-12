@@ -32,6 +32,14 @@ pub async fn get_storage_path() -> Result<PathBuf> {
     Ok(storage_path)
 }
 
+#[inline]
+pub async fn get_user_path() -> Result<PathBuf> {
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
+    let user_path = home_dir.join(".rdrive").join("user");
+    Ok(user_path)
+}
+
 // TODO: Implement public space
 #[inline(always)]
 pub async fn get_public_storage_path() -> Result<PathBuf> {
@@ -41,7 +49,7 @@ pub async fn get_public_storage_path() -> Result<PathBuf> {
     Ok(storage_path)
 }
 
-#[inline(always)]
+#[inline]
 pub fn get_catalog_path() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
@@ -73,17 +81,12 @@ pub async fn file_hasher_async(path: &Path) -> Result<String> {
     tokio::task::spawn_blocking(move || file_hasher(&path)).await?
 }
 
-// TODO: THIS NEED A SERIOUS REFACTOR
-//  I'M DITCHING TYPICAL CORPORATE AUTH SLOP, THIS GOING TO BE DECENTRALIZED NODE, FILE_SYSTEM AS PLAYGROUND
-//  Every file will go to either ~/.rdrive/storage/<file_key_hash + salt + timestamp>/<file-id> or
-//  ~/.rdrive/storage/<public>/<file-id>, THATS FUCK IT!!!!
-
 #[derive(Deserialize, Serialize)]
 pub struct MetadataFile {
     filename: String,
     file_size: u64,
     file_hash: String,
-    hashed_file_key: String,
+    file_key_hash: String,
 }
 
 impl MetadataFile {

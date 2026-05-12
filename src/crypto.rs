@@ -66,7 +66,7 @@ fn aes256_ctr_xor(key: &[u8; 32], nonce: &[u8; 12], data: &[u8]) -> Vec<u8> {
 }
 
 /// Hashes a slice of bytes and returns the hex string
-#[inline]
+#[inline(always)]
 pub fn hash_chunk(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -80,6 +80,26 @@ pub fn generate_key() -> String {
     let mut key = [0u8; 32];
     rng.fill_bytes(&mut key);
     hex::encode(key)
+}
+
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+
+/// Generates and returns a new Ed25519 keypair as hex strings (private_key, public_key)
+#[inline(always)]
+pub fn generate_ed25519_keypair() -> anyhow::Result<(SigningKey, VerifyingKey)> {
+    let mut rng = rand::rng();
+
+    let signing_key: SigningKey = SigningKey::generate(&mut rng);
+    let verifying_key: VerifyingKey = signing_key.verifying_key();
+
+    // Little test
+    let message = b"ed25519 key gen-test";
+    let signature = signing_key.sign(message);
+    verifying_key
+        .verify(message, &signature)
+        .map_err(|e| anyhow::anyhow!("Failed to verify signature: {}", e))?;
+
+    Ok((signing_key, verifying_key))
 }
 
 #[test]
