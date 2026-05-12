@@ -282,10 +282,12 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     // New key
     if flag == 1 {
         let key_header = NewKeyHeader::deserialize(&header_bytes)?;
-        match key_header.validate_signature(&nonce) {
+        match key_header.validate(&nonce) {
             Ok(_) => {
                 let public_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
                     .map_err(|e| anyhow::anyhow!("Failed to parse public key from PEM: {}", e))?;
+
+                // TODO: Allow-client file here
 
                 let pub_key_hash = encode(Sha256::digest(public_key.as_bytes()));
                 let user_dir = get_storage_path().await?.join(pub_key_hash);
@@ -308,33 +310,23 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         // Rotate existing keys
     } else if flag == 2 {
         let key_header = RotateKeyHeader::deserialize(&header_bytes)?;
-        let old_pub_key = VerifyingKey::from_public_key_pem(&key_header.old_public_pem)
-            .map_err(|e| anyhow::anyhow!("Failed to parse old public key from PEM: {}", e))?;
 
-        let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
-        let user_path = get_storage_path().await?.join(old_pub_key_hash);
-
-        if !user_path.exists() {
-            send_failed(
-                writer,
-                ErrorHeader {
-                    code: 404,
-                    message: "User not registered, not found".to_string(),
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-
-        match key_header.validate_signature(&nonce) {
+        match key_header.validate(&nonce).await {
             Ok(_) => {
                 let new_pub_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
                     .map_err(|e| {
                         anyhow::anyhow!("Failed to parse new public key from PEM: {}", e)
                     })?;
+                let old_pub_key = VerifyingKey::from_public_key_pem(&key_header.old_public_pem)
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to parse old public key from PEM: {}", e)
+                    })?;
 
                 let new_pub_key_hash = encode(Sha256::digest(new_pub_key.as_bytes()));
+                let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
+
                 let new_user_path = get_storage_path().await?.join(new_pub_key_hash);
+                let user_path = get_storage_path().await?.join(old_pub_key_hash);
 
                 tokio::fs::rename(&user_path, &new_user_path).await?;
                 timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??; // ACK
@@ -609,8 +601,10 @@ pub async fn register_pubkey(host: &str, port: u16) -> Result<(String, String)> 
     use ed25519_dalek::Signer;
     use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
 
-    let private_key_path = get_user_path().await?.join("private_key.pem");
-    let public_key_path = get_user_path().await?.join("public_key.pem");
+    let user_path = get_user_path().await?;
+
+    let private_key_path = user_path.join("private_key.pem");
+    let public_key_path = user_path.join("public_key.pem");
 
     let (private_key, public_key) = generate_ed25519_keypair()?;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
@@ -622,21 +616,18 @@ pub async fn register_pubkey(host: &str, port: u16) -> Result<(String, String)> 
         .to_public_key_pem(LineEnding::LF)
         .map_err(|e| anyhow::anyhow!("Failed to encode public key to PEM: {}", e))?;
 
-    let old_public_pem = if private_key_path.exists() && public_key_path.exists() {
-        Some(
-            tokio::fs::read_to_string(&public_key_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to read existing public key: {}", e))?,
-        )
-    } else {
-        None
+    // read existing public key if rotating
+    let old_public_pem = match (private_key_path.exists(), public_key_path.exists()) {
+        (true, true) => Some(tokio::fs::read_to_string(&public_key_path).await?),
+        _ => None,
     };
 
-    let request = if old_public_pem.is_some() {
-        Init(2u8).serialize()?
-    } else {
-        Init(1u8).serialize()?
-    };
+    // Save locally anyway, since client can manually upload pub_pem to server
+    tokio::fs::create_dir_all(&user_path).await?;
+    tokio::fs::write(user_path.join("private_key.pem"), &private_pem).await?;
+    tokio::fs::write(user_path.join("public_key.pem"), &public_pem).await?;
+
+    let request = Init(if old_public_pem.is_some() { 2 } else { 1 }).serialize()?;
 
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true).ok();
@@ -663,19 +654,22 @@ pub async fn register_pubkey(host: &str, port: u16) -> Result<(String, String)> 
         .context("Failed to read response")?;
 
     let signature = private_key.sign(&nonce);
-    let header_bytes = if let Some(old_pem) = old_public_pem {
-        let header = RotateKeyHeader {
-            signature: encode(signature.to_bytes()),
-            old_public_pem: old_pem,
-            new_public_pem: public_pem.clone(),
-        };
-        header.serialize()?
-    } else {
-        let header = NewKeyHeader {
-            signature: encode(signature.to_bytes()),
-            new_public_pem: public_pem.clone(),
-        };
-        header.serialize()?
+    let header_bytes = match old_public_pem {
+        Some(old_public_pem) => {
+            let header = RotateKeyHeader {
+                signature: encode(signature.to_bytes()),
+                old_public_pem,
+                new_public_pem: public_pem.clone(),
+            };
+            header.serialize()?
+        }
+        None => {
+            let header = NewKeyHeader {
+                signature: encode(signature.to_bytes()),
+                new_public_pem: public_pem.clone(),
+            };
+            header.serialize()?
+        }
     };
 
     let len = (header_bytes.len() as u32).to_be_bytes();

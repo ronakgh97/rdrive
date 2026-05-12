@@ -1,10 +1,10 @@
-use crate::MAX_FILE_SIZE;
+use crate::{MAX_FILE_SIZE, get_storage_path};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub enum Command {
-    Init(u8), // flags -> 1/2 = new/rotate
+    Init(u8), // flags -> 1/2 = new/rotate ...bool not used, cause I don't like enum for obvious reasons
     Upload(UploadHeader),
     Download(DownloadHeader),
     Status,
@@ -21,6 +21,11 @@ impl Command {
     }
 }
 
+use ed25519_dalek::pkcs8::DecodePublicKey;
+use ed25519_dalek::{Verifier, VerifyingKey};
+use hex::encode;
+use sha2::{Digest, Sha256};
+
 #[derive(Serialize, Deserialize)]
 pub struct NewKeyHeader {
     pub signature: String,
@@ -28,23 +33,8 @@ pub struct NewKeyHeader {
 }
 
 impl NewKeyHeader {
-    #[inline(always)]
-    pub fn validate_signature(&self, nonce: &[u8]) -> Result<()> {
-        use ed25519_dalek::pkcs8::DecodePublicKey;
-        use ed25519_dalek::{Verifier, VerifyingKey};
-
-        let signature_bytes = hex::decode(&self.signature)
-            .map_err(|e| anyhow::anyhow!("Failed to decode signature from hex: {}", e))?;
-        let signature = ed25519_dalek::Signature::try_from(&signature_bytes[..])
-            .map_err(|e| anyhow::anyhow!("Failed to parse signature: {}", e))?;
-
-        let public_key = VerifyingKey::from_public_key_pem(&self.new_public_pem)
-            .map_err(|e| anyhow::anyhow!("Failed to decode public key from PEM: {}", e))?;
-
-        public_key
-            .verify(nonce, &signature)
-            .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
-
+    pub fn validate(&self, nonce: &[u8]) -> Result<()> {
+        validate_signature(self.new_public_pem.clone(), self.signature.clone(), nonce)?;
         Ok(())
     }
     pub fn serialize(&self) -> Result<Vec<u8>> {
@@ -58,7 +48,6 @@ impl NewKeyHeader {
     }
 }
 
-// TODO; update white-list in the process
 #[derive(Serialize, Deserialize)]
 pub struct RotateKeyHeader {
     pub signature: String,
@@ -67,23 +56,18 @@ pub struct RotateKeyHeader {
 }
 
 impl RotateKeyHeader {
-    #[inline(always)]
-    pub fn validate_signature(&self, nonce: &[u8]) -> Result<()> {
-        use ed25519_dalek::pkcs8::DecodePublicKey;
-        use ed25519_dalek::{Verifier, VerifyingKey};
+    pub async fn validate(&self, nonce: &[u8]) -> Result<()> {
+        let old_pub_key = VerifyingKey::from_public_key_pem(&self.old_public_pem)
+            .map_err(|e| anyhow::anyhow!("Failed to parse old public key from PEM: {}", e))?;
 
-        let signature_bytes = hex::decode(&self.signature)
-            .map_err(|e| anyhow::anyhow!("Failed to decode signature from hex: {}", e))?;
-        let signature = ed25519_dalek::Signature::try_from(&signature_bytes[..])
-            .map_err(|e| anyhow::anyhow!("Failed to parse signature: {}", e))?;
+        let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
+        let user_path = get_storage_path().await?.join(old_pub_key_hash);
 
-        let public_key = VerifyingKey::from_public_key_pem(&self.new_public_pem)
-            .map_err(|e| anyhow::anyhow!("Failed to decode public key from PEM: {}", e))?;
+        if !user_path.exists() {
+            return Err(anyhow::anyhow!("User not registered, not found"));
+        }
 
-        public_key
-            .verify(nonce, &signature)
-            .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
-
+        validate_signature(self.new_public_pem.clone(), self.signature.clone(), nonce)?;
         Ok(())
     }
     pub fn serialize(&self) -> Result<Vec<u8>> {
@@ -95,6 +79,23 @@ impl RotateKeyHeader {
         postcard::from_bytes(data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize RotateKeyHeader: {}", e))
     }
+}
+
+#[inline(always)]
+pub fn validate_signature(public_pem: String, signature: String, nonce: &[u8]) -> Result<()> {
+    let signature_bytes = hex::decode(&signature)
+        .map_err(|e| anyhow::anyhow!("Failed to decode signature from hex: {}", e))?;
+    let signature = ed25519_dalek::Signature::try_from(&signature_bytes[..])
+        .map_err(|e| anyhow::anyhow!("Failed to parse signature: {}", e))?;
+
+    let public_key = VerifyingKey::from_public_key_pem(&public_pem)
+        .map_err(|e| anyhow::anyhow!("Failed to decode public key from PEM: {}", e))?;
+
+    public_key
+        .verify(nonce, &signature)
+        .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
+
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
