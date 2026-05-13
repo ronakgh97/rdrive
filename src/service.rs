@@ -1,22 +1,10 @@
-use crate::get_storage_path;
 use crate::protocol_v1::start_tcp_server;
+use crate::{get_allowed_client_path, get_storage_path};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub async fn serve_tcp(port: Option<u16>) -> Result<()> {
-    let port = server_init(port).await?;
-
-    let storage_path: PathBuf = get_storage_path().await?;
-    tokio::fs::create_dir_all(&storage_path).await?;
-
-    start_tcp_server(port, Arc::new(storage_path)).await?;
-
-    Ok(())
-}
-
-/// Init necessary check and envs and returns port
-async fn server_init(port: Option<u16>) -> Result<u16> {
     dotenv::dotenv().ok();
 
     let port = port.unwrap_or_else(|| {
@@ -27,7 +15,15 @@ async fn server_init(port: Option<u16>) -> Result<u16> {
         }
     });
 
-    Ok(port)
+    let storage_path: PathBuf = get_storage_path().await?;
+    tokio::fs::create_dir_all(&storage_path).await?;
+
+    let authorised_client = get_allowed_client_path().await?;
+    tokio::fs::create_dir_all(&authorised_client).await?;
+
+    start_tcp_server(port, Arc::new(storage_path)).await?;
+
+    Ok(())
 }
 
 // TODO: use ACTIVE_CONNECTIONS to implement this

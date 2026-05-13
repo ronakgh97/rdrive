@@ -1,12 +1,16 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
+use ed25519_dalek::SigningKey;
+use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use r_drive::args::{ClientArgs, ClientCommands};
+use r_drive::crypto::generate_ed25519_keypair;
 use r_drive::protocol_v1::{
     download_client as download_file_v1, get_server_status, register_pubkey,
     upload_client as upload_file_v1,
 };
-use r_drive::{Catalog, ascii_art, get_catalog_path};
+use r_drive::{Catalog, ascii_art, get_catalog_path, get_user_path};
 use std::io;
 use uuid::Uuid;
 
@@ -15,18 +19,75 @@ async fn main() -> Result<()> {
     let args = ClientArgs::parse();
 
     match args.command {
-        Some(ClientCommands::Init { address, port }) => {
-            use ed25519_dalek::VerifyingKey;
-            use ed25519_dalek::pkcs8::DecodePublicKey;
+        Some(ClientCommands::Key {
+            address,
+            port,
+            rot,
+            auth,
+        }) => {
+            let user_path = get_user_path().await?;
+            let private_key_path = user_path.join("private_key.pem");
+            let public_key_path = user_path.join("public_key.pem");
 
-            let (_, public_pem) = register_pubkey(&address, port).await?;
+            let old_keys = if private_key_path.exists() && public_key_path.exists() {
+                Some((
+                    tokio::fs::read_to_string(&private_key_path).await?,
+                    tokio::fs::read_to_string(&public_key_path).await?,
+                ))
+            } else {
+                None
+            };
 
-            let public_key = VerifyingKey::from_public_key_pem(public_pem.as_str())?;
-            println!(
-                "Generated public key (HEX): {}",
-                hex::encode(public_key.to_bytes()).green()
-            );
-            println!("Generated public key (PEM): \n{}", public_pem.green());
+            if rot {
+                let (old_pri, old_pub) = old_keys.context("No existing keys. Cannot rotate.")?;
+                let signing_key = SigningKey::from_pkcs8_pem(&old_pri)
+                    .context("Bad private key, cannot rotate")?;
+
+                let (new_pri, new_pub) = generate_ed25519_keypair()?;
+                let new_pri_pem = new_pri.to_pkcs8_pem(LineEnding::LF)?.to_string();
+                let new_pub_pem = new_pub.to_public_key_pem(LineEnding::LF)?;
+
+                println!(
+                    "Preview Public key (HEX):\n{}",
+                    hex::encode(new_pub_pem.as_bytes()).green()
+                );
+
+                // IMPORTANT, sync the rotation with the server FIRST!
+                // If this fails, we DO NOT write to disk, saving you from a fatal desync lockout.
+                register_pubkey(signing_key, &new_pub_pem, Some(old_pub), &address, port).await?;
+
+                tokio::fs::create_dir_all(&user_path).await?;
+                tokio::fs::write(&private_key_path, &new_pri_pem).await?;
+                tokio::fs::write(&public_key_path, &new_pub_pem).await?;
+            } else {
+                let (signing_key, pub_pem) = if let Some((pri_pem, pub_pem)) = old_keys {
+                    let signing_key = SigningKey::from_pkcs8_pem(&pri_pem)
+                        .context("Bad private key, cannot authenticate")?;
+                    println!("Loaded existing local keypair.");
+                    (signing_key, pub_pem)
+                } else {
+                    let (new_pri, new_pub) = generate_ed25519_keypair()?;
+                    let new_pri_pem = new_pri.to_pkcs8_pem(LineEnding::LF)?.to_string();
+                    let new_pub_pem = new_pub.to_public_key_pem(LineEnding::LF)?;
+
+                    tokio::fs::create_dir_all(&user_path).await?;
+                    tokio::fs::write(&private_key_path, &new_pri_pem).await?;
+                    tokio::fs::write(&public_key_path, &new_pub_pem).await?;
+                    println!("Generated ed22519 keypair.");
+                    (new_pri, new_pub_pem)
+                };
+
+                println!(
+                    "Public key (HEX):\n{}",
+                    hex::encode(pub_pem.as_bytes()).green()
+                );
+
+                if auth {
+                    register_pubkey(signing_key, &pub_pem, None, &address, port).await?;
+                } else {
+                    println!("Make sure to have your HEX public key whitelisted on the server");
+                }
+            }
         }
         Some(ClientCommands::Push {
             file,
@@ -87,7 +148,7 @@ async fn main() -> Result<()> {
                         info.last_pull
                     );
                 }
-                print!("File already exists, overwrite? [N/0]: ");
+                print!("Overwrite? [n/0]: ");
 
                 let input: usize = {
                     io::Write::flush(&mut io::stdout())?;

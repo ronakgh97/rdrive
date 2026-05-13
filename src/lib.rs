@@ -32,21 +32,29 @@ pub async fn get_storage_path() -> Result<PathBuf> {
     Ok(storage_path)
 }
 
+// TODO: Implement public space
+#[inline(always)]
+pub async fn get_public_storage_path() -> Result<PathBuf> {
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
+    let pub_storage_path = home_dir.join(".rdrive").join("storage").join("public");
+    Ok(pub_storage_path)
+}
+
+#[inline(always)]
+pub async fn get_allowed_client_path() -> Result<PathBuf> {
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
+    let allowed_clients_path = home_dir.join(".rdrive").join("authorized_keys");
+    Ok(allowed_clients_path)
+}
+
 #[inline]
 pub async fn get_user_path() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
     let user_path = home_dir.join(".rdrive").join("user");
     Ok(user_path)
-}
-
-// TODO: Implement public space
-#[inline(always)]
-pub async fn get_public_storage_path() -> Result<PathBuf> {
-    let home_dir =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
-    let storage_path = home_dir.join(".rdrive").join("storage").join("public");
-    Ok(storage_path)
 }
 
 #[inline]
@@ -205,6 +213,13 @@ impl Catalog {
 pub static START_TIME: OnceLock<chrono::DateTime<Local>> = OnceLock::new();
 pub static ACTIVE_CONNECTIONS: LazyLock<Arc<AtomicUsize>> =
     LazyLock::new(|| Arc::new(AtomicUsize::new(0)));
+pub static ALLOW_ALL_CLIENTS: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("ALLOW_ALL_CLIENTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(true) // default to true
+});
+
 pub static MAX_CONNECTIONS: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("MAX_CONNECTIONS")
         .ok()

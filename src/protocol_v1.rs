@@ -1,18 +1,19 @@
-use crate::crypto::generate_ed25519_keypair;
 use crate::header::Command::Init;
 use crate::header::{
     Command, DownloadHeader, DownloadResponse, ErrorHeader, NewKeyHeader, RotateKeyHeader,
     StatusHeader, UploadHeader, UploadResponse,
 };
 use crate::{
-    ACTIVE_CONNECTIONS, MAX_CONNECTIONS, MetadataFile, NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER,
-    READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER, START_TIME, Tracker, WRITE_TIMEOUT, debug,
-    error, file_hasher_async, get_file_lock, get_storage_path, get_user_path, info,
-    release_file_lock, trace, try_get_uptime_hrs, warn,
+    ACTIVE_CONNECTIONS, ALLOW_ALL_CLIENTS, MAX_CONNECTIONS, MetadataFile, NETWORK_READ_BUFFER,
+    NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER, START_TIME, Tracker,
+    WRITE_TIMEOUT, debug, error, file_hasher_async, get_allowed_client_path, get_file_lock,
+    get_storage_path, info, release_file_lock, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
-use ed25519_dalek::{VerifyingKey, pkcs8::DecodePublicKey};
+use ed25519_dalek::pkcs8::EncodePublicKey;
+use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+use ed25519_dalek::{SigningKey, VerifyingKey, pkcs8::DecodePublicKey};
 use hex::encode;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
@@ -284,15 +285,38 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         let key_header = NewKeyHeader::deserialize(&header_bytes)?;
         match key_header.validate(&nonce) {
             Ok(_) => {
+                use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
                 let public_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
                     .map_err(|e| anyhow::anyhow!("Failed to parse public key from PEM: {}", e))?;
+                let public_key_pem = public_key.to_public_key_pem(LineEnding::LF)?;
 
-                // TODO: Allow-client file here
+                let authorized_keys = get_allowed_client_path().await?;
+
+                if !*ALLOW_ALL_CLIENTS
+                    && !authorized_keys
+                        .join(encode(public_key_pem.as_bytes()))
+                        .exists()
+                    && !authorized_keys
+                        .join(encode(public_key_pem.as_bytes()))
+                        .is_dir()
+                {
+                    send_failed(
+                        writer,
+                        ErrorHeader {
+                            code: 403,
+                            message: "Client not authorized, Please contact the admin, provider or ssh into the server".to_string(),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
 
                 let pub_key_hash = encode(Sha256::digest(public_key.as_bytes()));
-                let user_dir = get_storage_path().await?.join(pub_key_hash);
+                let user_storage_dir = get_storage_path().await?.join(pub_key_hash);
 
-                tokio::fs::create_dir_all(&user_dir).await?;
+                tokio::fs::create_dir_all(authorized_keys.join(encode(public_key_pem.as_bytes())))
+                    .await?;
+                tokio::fs::create_dir_all(&user_storage_dir).await?;
                 timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??; // ACK
             }
             Err(e) => {
@@ -312,7 +336,7 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         let key_header = RotateKeyHeader::deserialize(&header_bytes)?;
 
         match key_header.validate(&nonce).await {
-            Ok(_) => {
+            Ok(user_path) => {
                 let new_pub_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
                     .map_err(|e| {
                         anyhow::anyhow!("Failed to parse new public key from PEM: {}", e)
@@ -322,13 +346,28 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                         anyhow::anyhow!("Failed to parse old public key from PEM: {}", e)
                     })?;
 
+                let new_public_key_pem = new_pub_key.to_public_key_pem(LineEnding::LF)?;
+                let old_public_key_pem = old_pub_key.to_public_key_pem(LineEnding::LF)?;
+
+                let new_pub_key_hex = encode(new_public_key_pem.as_bytes());
+                let old_pub_key_hex = encode(old_public_key_pem.as_bytes());
+
                 let new_pub_key_hash = encode(Sha256::digest(new_pub_key.as_bytes()));
-                let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
+                //let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
 
                 let new_user_path = get_storage_path().await?.join(new_pub_key_hash);
-                let user_path = get_storage_path().await?.join(old_pub_key_hash);
+                //let user_path = get_storage_path().await?.join(old_pub_key_hash);
 
+                let auth_keys_path = get_allowed_client_path().await?;
+
+                // hope this does not fail
+                tokio::fs::rename(
+                    auth_keys_path.join(old_pub_key_hex),
+                    auth_keys_path.join(new_pub_key_hex),
+                )
+                .await?;
                 tokio::fs::rename(&user_path, &new_user_path).await?;
+
                 timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??; // ACK
             }
             Err(e) => {
@@ -596,36 +635,14 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 // TODO: Too many repetitive lazy code, very poor thinking, refactor later
 
 /// Client function to register a new public key or rotate existing keys: connect to server, perform nonce challenge, sign nonce, send key info, handle ACK or error response
-/// returns private, public key with PEM format
-pub async fn register_pubkey(host: &str, port: u16) -> Result<(String, String)> {
+pub async fn register_pubkey(
+    private_key: SigningKey,
+    public_pem: &str,
+    old_public_pem: Option<String>,
+    host: &str,
+    port: u16,
+) -> Result<()> {
     use ed25519_dalek::Signer;
-    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-
-    let user_path = get_user_path().await?;
-
-    let private_key_path = user_path.join("private_key.pem");
-    let public_key_path = user_path.join("public_key.pem");
-
-    let (private_key, public_key) = generate_ed25519_keypair()?;
-    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    let private_pem = private_key
-        .to_pkcs8_pem(LineEnding::LF)
-        .map_err(|e| anyhow::anyhow!("Failed to encode private key to PEM: {}", e))?
-        .to_string();
-    let public_pem = public_key
-        .to_public_key_pem(LineEnding::LF)
-        .map_err(|e| anyhow::anyhow!("Failed to encode public key to PEM: {}", e))?;
-
-    // read existing public key if rotating
-    let old_public_pem = match (private_key_path.exists(), public_key_path.exists()) {
-        (true, true) => Some(tokio::fs::read_to_string(&public_key_path).await?),
-        _ => None,
-    };
-
-    // Save locally anyway, since client can manually upload pub_pem to server
-    tokio::fs::create_dir_all(&user_path).await?;
-    tokio::fs::write(user_path.join("private_key.pem"), &private_pem).await?;
-    tokio::fs::write(user_path.join("public_key.pem"), &public_pem).await?;
 
     let request = Init(if old_public_pem.is_some() { 2 } else { 1 }).serialize()?;
 
@@ -659,14 +676,14 @@ pub async fn register_pubkey(host: &str, port: u16) -> Result<(String, String)> 
             let header = RotateKeyHeader {
                 signature: encode(signature.to_bytes()),
                 old_public_pem,
-                new_public_pem: public_pem.clone(),
+                new_public_pem: public_pem.to_string(),
             };
             header.serialize()?
         }
         None => {
             let header = NewKeyHeader {
                 signature: encode(signature.to_bytes()),
-                new_public_pem: public_pem.clone(),
+                new_public_pem: public_pem.to_string(),
             };
             header.serialize()?
         }
@@ -695,12 +712,12 @@ pub async fn register_pubkey(host: &str, port: u16) -> Result<(String, String)> 
         println!("Registered successfully");
     } else if rsp[0] == 0x2u8 {
         let err = ErrorHeader::deserialize(&rsp[1..])?;
-        anyhow::bail!("Registration failed: {} - {}", err.code, err.message);
+        anyhow::bail!("Auth failed: {} - {}", err.code, err.message);
     } else {
-        anyhow::bail!("Registration failed: Unknown reason");
+        anyhow::bail!("Auth failed: Unknown reason");
     }
 
-    Ok((private_pem, public_pem))
+    Ok(())
 }
 
 /// Client function to upload a file: connect to server, send upload request, stream file data, handle responses and errors

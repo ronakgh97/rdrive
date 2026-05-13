@@ -75,7 +75,7 @@ pub fn hash_chunk(data: &[u8]) -> String {
 
 /// Generate a generic random 32-byte key and return it as a hex string
 #[inline(always)]
-pub fn generate_key() -> String {
+pub fn generate_b32key() -> String {
     let mut rng = rand::rng();
     let mut key = [0u8; 32];
     rng.fill_bytes(&mut key);
@@ -89,17 +89,25 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 pub fn generate_ed25519_keypair() -> anyhow::Result<(SigningKey, VerifyingKey)> {
     let mut rng = rand::rng();
 
-    let signing_key: SigningKey = SigningKey::generate(&mut rng);
-    let verifying_key: VerifyingKey = signing_key.verifying_key();
+    let private_key: SigningKey = SigningKey::generate(&mut rng);
+    let public_key: VerifyingKey = private_key.verifying_key();
 
     // Little test
     let message = b"ed25519 key gen-test";
-    let signature = signing_key.sign(message);
-    verifying_key
+    let signature = private_key.sign(message);
+    public_key
         .verify(message, &signature)
         .map_err(|e| anyhow::anyhow!("Failed to verify signature: {}", e))?;
 
-    Ok((signing_key, verifying_key))
+    Ok((private_key, public_key))
+}
+
+use x25519_dalek::{EphemeralSecret, PublicKey};
+/// Generates and returns a new X25519 keypair (private_key, public_key)
+pub fn generate_x25519_keypair() -> anyhow::Result<(EphemeralSecret, PublicKey)> {
+    let private_key = EphemeralSecret::random_from_rng(&mut rand::rng());
+    let public_key = PublicKey::from(&private_key);
+    Ok((private_key, public_key))
 }
 
 #[test]

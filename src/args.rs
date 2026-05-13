@@ -43,9 +43,9 @@ pub struct ClientArgs {
 
 #[derive(Subcommand)]
 pub enum ClientCommands {
-    /// Derive ED25519 key pair locally and register with the server,
+    /// Derive ED25519 key pair locally and auth with the server,
     /// this is required before any push/pull operations
-    Init {
+    Key {
         /// Address of the server to connect to (default: 127.0.0.1)
         #[arg(long, default_value = "127.0.0.1")]
         address: String,
@@ -53,6 +53,14 @@ pub enum ClientCommands {
         /// Port to connect to the server (default: 3000)
         #[arg(long, default_value = "3000")]
         port: u16,
+
+        /// Authenticate with the server using the new key
+        #[arg(short, long, conflicts_with = "rot")]
+        auth: bool,
+
+        /// Rotate/Sync keys with server and backup old ones
+        #[arg(short, long, conflicts_with = "auth")]
+        rot: bool,
     },
 
     /// Upload a file to the server

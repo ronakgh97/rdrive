@@ -1,5 +1,7 @@
 Tweaking with Network Protocol while building AWS s3 ***COMMUNIST VERSION***
 
+> Network security is just a side-quest
+
 Use docker [image](https://hub.docker.com/repository/docker/ronakgh97/rdrive/general)
 
 ```shell
@@ -60,7 +62,6 @@ TODO
 - Thread pool for better concurrency and resource management
 - Better file management and cleanup strategies
 - Authentication and access control
-- Uhm...what else?
 - Fix and improve the buffering and streaming for large files (diff hashing, chunking, chopping, etc.)
 - More protocol features like file listing, metadata retrieval, more commands etc. [DONE]
 - Graceful shutdown and cleanup
@@ -79,7 +80,10 @@ TODO
 - DO some CAS magic for better storage efficiency and deduplication
 - Backup and restore features
 - Fix the MASTER_KEY/Encrption redundancy
+- Proper secure protocol design, fuck TLS, SSL shit
+- Portable cross-lang protocol
+- Recoverable keys somehow?
 
 https://www.backblaze.com/docs/cloud-storage-about-backblaze-b2-cloud-storage
 
-HIRE ME AS AN INTERN ***BLACKBLAZE*** 😭🌹
+HIRE ME ***BLACKBLAZE*** 🥺😭🤧 🌹

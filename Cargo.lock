@@ -875,6 +875,7 @@ dependencies = [
  "sha2",
  "tokio",
  "uuid",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -1461,6 +1462,17 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "x25519-dalek"
+version = "3.0.0-pre.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3d5d6ff67acd3945b933e592bfa7143db4fcbb2f871754b6b9fbd7847fc5aea"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core",
+ "zeroize",
 ]
 
 [[package]]
