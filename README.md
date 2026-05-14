@@ -1,57 +1,89 @@
-Tweaking with Network Protocol while building AWS s3 ***COMMUNIST VERSION***
+Tweaking with Network Protocol & Security while building Amazon s3 ***COMMUNIST VERSION***
 
-> Network security is just a side-quest
+`Ohh no I'm getting side-tracked by crypto shit`
 
-Use docker [image](https://hub.docker.com/repository/docker/ronakgh97/rdrive/general)
+Features
+
+- file-system native database
+- super secure & decentralized `(uses ed22519 key for identify & x25519 for protocol encryption)`
+- layering, delta transfer push/pull
+- built-in TLS'ish, server secure even on raw ip port
+- backups, versioning, secure key rotation
+- zero-trust architecture
+- fearless concurrency (very little locks freeze)
+
+How to set up?
+
+Use docker [image](https://hub.docker.com/repository/docker/ronakgh97/rdrive/general) then you can use the CLI to
+auth/push/pull files
 
 ```shell
-docker pull ronakgh97/rdrive:latest (<60 mb)
+docker pull ronakgh97/rdrive:latest (<100 mb)
 docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name rdrive ronakgh97/rdrive:latest
 ```
 
-then you can use the CLI to push/pull files
+```shell
+# ssh into server or go into docker container, 
+# and create ~/.rdrive/authorized_keys/<hex public key> dir for whitelisting 
+# or just ALLOW_ALL_CLIENTS false
+
+rdrive key # gen ed25519 keypair, does not overwrite until you do `-r` or `-a` for first init
+Generated ed25519 keypair.
+Public key (HEX):
+2d2d2d2d2d424547494e205055424c4943204b45592d2d2d2d2d0a4d436f77425159444b325677417945412f6b706e4e395748336c574a4d516457716d7448764f433363765a693344634154366b2b745a49686f2f733d0a2d2d2d2d2d454e44205055424c4943204b45592d2d2d2d2d0a
+Make sure to whitelist your HEX public key on the server, If not already auth
+
+mkdir ~/.rdrive/authorized_keys/2d2d2d2d2d424547494e205055424c4943204b45592d2d2d2d2d0a4d436f77425159444b325677417945415447544c6b4a715432795039536775434268646c6b567966793345743248675850334d67316d644c6b75493d0a2d2d2d2d2d454e44205055424c4943204b45592d2d2d2d2d0a/
+
+rdrive key -a # -a for init auth
+Found existing keypair
+Public key (HEX):
+2d2d2d2d2d424547494e205055424c4943204b45592d2d2d2d2d0a4d436f77425159444b325677417945412f6b706e4e395748336c574a4d516457716d7448764f433363765a693344634154366b2b745a49686f2f733d0a2d2d2d2d2d454e44205055424c4943204b45592d2d2d2d2d0a
+Auth successfully
+
+rdrive key -r # -r for rotate/sync key
+Preview Public key (HEX):
+2d2d2d2d2d424547494e205055424c4943204b45592d2d2d2d2d0a4d436f77425159444b325677417945415447544c6b4a715432795039536775434268646c6b567966793345743248675850334d67316d644c6b75493d0a2d2d2d2d2d454e44205055424c4943204b45592d2d2d2d2d0a                    
+Auth successfully
+Key rotated/synced successfully
+```
 
 ```shell
 rdrive push --file dummy.bin --protocol v1 --port 3000
 Enter file key: ronak
-1 a547a8a15a9b4ae890b8fe06bb542efe | pushed (2026-05-09 20:15:55) | pulled (never)
-2 ac69860b5948400992116baca7f845f6 | pushed (2026-05-09 20:16:05) | pulled (never)
-File already exists, overwrite? [N/0]: 0
+1 abc83897fc2c46e7941bb930e3715776 | pushed (2026-05-14 17:43:02) | pulled (never)
+2 d6942ba17c8e4ecf941bf5eb24144036 | pushed (2026-05-14 17:43:11) | pulled (never)
+Overwrite? [n/0]: 0
 Starting upload: dummy.bin (578.9375 mb)
-File hash: 4ea1b5d5...
-File ID: 0067f7174e754a9297f9ff35a6356ad2 - Time took: 1.5184643
+File hash: 4ea1b5d551d3876f74b6634c4dde1611a8000d798044268ea103736221e7378e
+File ID: 9d6cd98c4503467faff3df10578e9e7c - Time took: 0.9695444
 ````
 
 ```shell
 rdrive pull --protocol v1 --port 3000                 
-Enter file ID: a547a8a15a9b4ae890b8fe06bb542efe
+Enter file ID: abc83897fc2c46e7941bb930e3715776
 Enter file key: ronak
 Downloading: dummy.bin (578.9375 mb)
 Saved to: .\dummy.bin
 ```
 
-layering/CAS (WIP)
+Layering/Delta Transfer/CAS (WIP)
 
 ```shell
 running 1 test
-hash of old file: 7268156ca0497d7c7aad758656b2c080ec124eb1e06cbb5de4aa0f311219a7ee
-hash of old layers:
-Layer 0: hash=63c20485a34b72207119c02b0414ee86dd81fc49cb9f63b2b79715f38b57e8c9, offset=0, size=67108864
-Layer 1: hash=03e09db653ef2e7b11f7654195ac4f53070b90d99b5c446c22fc973cd437c949, offset=67108864, size=67108864
-Layer 2: hash=c3023dc7f6667e6bc37c4334a12d7d8e46803462a84fd0fe65870ce8fa58bc4d, offset=134217728, size=67108864
-Layer 3: hash=05fb144065f7cb5b24dcca8d235122b1bd50f63afd4fb6422024e350f88b2ba1, offset=201326592, size=67108864
-hash of reconstructed file: 7268156ca0497d7c7aad758656b2c080ec124eb1e06cbb5de4aa0f311219a7ee
-hash of new layers:
-Layer 0: hash=5a6111e3c550c1850e29d17fc237f89f15866f8b0569f59a6f628d63c54030d2, offset=0, size=67108864
-Layer 1: hash=beba9d9c5428dabcd2c7c43db6bfa10d766b932bebc2dc0367c912392104b1e3, offset=67108864, size=67108864
-Layer 2: hash=31974ed7ec7e866fda0a231f1e506c607a1b462f69d7186f6c0f50b3724c07d4, offset=134217728, size=67108864
-Layer 3: hash=c0bbc29b7724a95af943188ac06be0a44485b52e36cba1a84c847c74792095b4, offset=201326592, size=67108864
-Changed layers:
-Layer 0: hash=63c20485a34b72207119c02b0414ee86dd81fc49cb9f63b2b79715f38b57e8c9, offset=0, size=67108864
-Layer 1: hash=03e09db653ef2e7b11f7654195ac4f53070b90d99b5c446c22fc973cd437c949, offset=67108864, size=67108864
-Layer 2: hash=c3023dc7f6667e6bc37c4334a12d7d8e46803462a84fd0fe65870ce8fa58bc4d, offset=134217728, size=67108864
-Layer 3: hash=05fb144065f7cb5b24dcca8d235122b1bd50f63afd4fb6422024e350f88b2ba1, offset=201326592, size=67108864
-test layer::experimental_layer_test ... ok
+Hash of old file: 71a76fce0e402f2643078c01b1a82ddc6b647fa130c8647b0df8e327b6616e96
+Layer metadata of old.tmp:
+hash=d39aa5b5b22fd0ca18e073764b1a17c5c18d4e87f791d983c241624de1f53517, offset=0
+hash=b4661b0652c6643b7dc4db85574af237f0c855ce5b19c167e30e41f0f161013d, offset=67108864
+hash=16f4039ae20635e2e61db45257f2cccc9d122dcdfc7f32d89491565f5bc795a7, offset=134217728
+hash=346104ebf6a91848949f8f5af8bff439e58dd75854abdcf731b278bd2ce5f7a1, offset=201326592
+Hash of old file: cea79e99936ca4c3b85a144f8a542f631c4fd8a64b1368b967de57fe9252f1c2
+Layer metadata of new.tmp:
+hash=e40164c21c10e1f47c9eac7f8875796f6bbb3e2ec2a67f65911f0ce28acaae03, offset=0 # ONLY THIS LAYER CHANGED, rest are same as old.tmp, so only 1 layer needs to be uploaded
+hash=b4661b0652c6643b7dc4db85574af237f0c855ce5b19c167e30e41f0f161013d, offset=67108864
+hash=16f4039ae20635e2e61db45257f2cccc9d122dcdfc7f32d89491565f5bc795a7, offset=134217728
+hash=346104ebf6a91848949f8f5af8bff439e58dd75854abdcf731b278bd2ce5f7a1, offset=201326592
+test layer::test_layering ... ok
 ```
 
 TODO
@@ -60,8 +92,8 @@ TODO
 - Better Bandwidth tracking and limits [DONE]
 - Better Error handling and logging [DONE]
 - Thread pool for better concurrency and resource management
-- Better file management and cleanup strategies
-- Authentication and access control
+- Better file management and cleanup strategies [Partially DONE]
+- Authentication and access control [Partially DONE]
 - Fix and improve the buffering and streaming for large files (diff hashing, chunking, chopping, etc.)
 - More protocol features like file listing, metadata retrieval, more commands etc. [DONE]
 - Graceful shutdown and cleanup
@@ -69,17 +101,17 @@ TODO
 - Protocol v2 meant to be use UDP, but skill issues...
 - Encrypted share feature between clients (stateless relay server) without sharing the master key, maybe using some kind
   of temporary keys or
-  something, idk
+  something, idk [Partially DONE]
 - Migrate to async architecture (TOKIO) [DONE]
-- Too many repetitive code, need to refactor and clean up the codebase [DONE]
+- Too many repetitive code, need to refactor and clean up the codebase
 - Still some buffering issues, data gets stalls, does not flush properly [DONE]
 - Multi-port support for better concurrency
 - rsync support (rolling hashing, delta transfers, etc.) CDC `LAYERING like docker`
 - Serialized headers, rm fragile parsing [DONE]
-- Add proper user-space (multiple users)
+- Add proper user-space (multiple users) [Partially DONE]
 - DO some CAS magic for better storage efficiency and deduplication
 - Backup and restore features
-- Fix the MASTER_KEY/Encrption redundancy
+- Fix the MASTER_KEY/Encrption redundancy [Partially DONE]
 - Proper secure protocol design, fuck TLS, SSL shit
 - Portable cross-lang protocol
 - Recoverable keys somehow?, better recover & key backups

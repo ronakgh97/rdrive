@@ -19,6 +19,7 @@ async fn main() -> Result<()> {
     let args = ClientArgs::parse();
 
     match args.command {
+        // TODO: Somehow find a way to recover keys
         Some(ClientCommands::Key {
             address,
             port,
@@ -53,7 +54,7 @@ async fn main() -> Result<()> {
                     hex::encode(new_pub_pem.as_bytes()).green()
                 );
 
-                // Sync with server BEFORE writing to disk!!!
+                // Try sync with server BEFORE writing to disk!!!
                 auth_pubkey(
                     signing_key,
                     &new_pub_pem,
@@ -146,7 +147,7 @@ async fn main() -> Result<()> {
             let catalog_dir = catalog_path
                 .parent()
                 .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?;
-            std::fs::create_dir_all(catalog_dir)?;
+            tokio::fs::create_dir_all(catalog_dir).await?;
 
             // Read existing or new
             let mut catalog = if catalog_path.exists() {
@@ -298,6 +299,7 @@ async fn main() -> Result<()> {
 
                 println!("Status timestamp: {}", status.timestamp);
                 println!("Uptime: {} hrs", status.uptime_hrs);
+                println!("Total Auth client: {}", status.auth_client);
                 println!(
                     "Total {} uploads, {} downloads",
                     status.total_uploaded, status.total_downloaded

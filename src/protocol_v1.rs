@@ -1,7 +1,6 @@
-use crate::header::Command::Init;
 use crate::header::{
     Command, DownloadHeader, DownloadResponse, ErrorHeader, NewKeyHeader, RotateKeyHeader,
-    StatusHeader, UploadHeader, UploadResponse,
+    StatusHeader, UploadHeader, UploadResponse, WarnHeader,
 };
 use crate::{
     ACTIVE_CONNECTIONS, ALLOW_ALL_CLIENTS, MAX_CONNECTIONS, MetadataFile, NETWORK_READ_BUFFER,
@@ -88,14 +87,17 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
                 .await;
                 return Ok(());
             }
-            if e.to_string().contains("early eof") || e.to_string().contains("EOF") {
+            if ["eof", "early eof", "unexpected eof"]
+                .iter()
+                .any(|pattern| e.to_string().to_lowercase().contains(pattern))
+            {
                 return Ok(());
             }
             return Err(e);
         }
     };
     match command {
-        Init(flags) => {
+        Command::Init(flags) => {
             debug!("Received INIT request");
             handle_keys(&mut reader, &mut writer, flags).await?;
             writer.flush().await?;
@@ -154,7 +156,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
     }
 }
 
-// Read 4 bytes for frame length with timeout, return error on timeout or read failure
+/// Read 4 bytes for frame length with timeout, return error on timeout or read failure
 #[inline(always)]
 pub async fn read_frame_length<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u32> {
     const MAX_FRAME_LENGTH: u32 = 1024 * 1024 * 12;
@@ -174,7 +176,7 @@ pub async fn read_frame_length<R: AsyncReadExt + Unpin>(reader: &mut R) -> Resul
     Ok(len)
 }
 
-// Read headers with timeout, return packed command, handle timeout and early EOF
+/// Read headers with timeout, return packed command, handle timeout and early EOF
 #[inline(always)]
 async fn read_headers<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Command> {
     let len = read_frame_length(reader).await? as usize;
@@ -185,7 +187,7 @@ async fn read_headers<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Command
     Ok(command)
 }
 
-// Write a frame with 4-byte length prefix, return error on write failure
+/// Write a frame with 4-byte length prefix, return error on write failure
 #[inline(always)]
 pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> Result<()> {
     let len = data.len();
@@ -199,7 +201,7 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) 
     Ok(())
 }
 
-// Send a generic serialized success response with code and message, then close the connection
+/// Send a generic serialized success response with code and message, then close the connection
 #[inline]
 async fn send_success<W: AsyncWriteExt + Unpin, T: Serialize>(
     writer: &mut W,
@@ -214,9 +216,19 @@ async fn send_success<W: AsyncWriteExt + Unpin, T: Serialize>(
     Ok(())
 }
 
-// TODO: Add send_warn here
+/// Send a generic warning response with code and message, then close the connection
+#[inline]
+async fn send_warn<W: AsyncWriteExt + Unpin>(writer: &mut W, response: WarnHeader) -> Result<()> {
+    let payload_bytes = response.serialize()?;
+    let mut rsp = Vec::with_capacity(1 + payload_bytes.len());
+    rsp.push(2u8); // 2 = warning
+    rsp.extend(payload_bytes);
+    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??;
+    writer.shutdown().await?;
+    Ok(())
+}
 
-// Send an error response with code and message, then close the connection
+/// Send an error response with code and message, then close the connection
 #[inline]
 async fn send_failed<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
@@ -224,14 +236,14 @@ async fn send_failed<W: AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     let payload_bytes = response.serialize()?;
     let mut rsp = Vec::with_capacity(1 + payload_bytes.len());
-    rsp.push(2u8); // 2 = error
+    rsp.push(3u8); // 3 = error
     rsp.extend(payload_bytes);
     timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??;
     writer.shutdown().await?;
     Ok(())
 }
 
-// Send a status response with server info, then close the connection
+/// Send a status response with server info, then close the connection
 #[inline]
 async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
     let uptime_hrs = try_get_uptime_hrs();
@@ -245,11 +257,21 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
         )
     };
 
+    let user_storage_path = get_storage_dir().await?;
+    let mut rd = tokio::fs::read_dir(&user_storage_path).await?;
+    let mut dir_count: usize = 0;
+    while let Some(entry) = rd.next_entry().await? {
+        if entry.file_type().await?.is_dir() {
+            dir_count += 1;
+        }
+    }
+
     let timestamp = chrono::Utc::now().to_rfc3339();
 
     let status = StatusHeader {
         timestamp,
         uptime_hrs,
+        auth_client: dir_count as u64,
         total_uploaded: total_upl as u64,
         total_downloaded: total_dwn as u64,
         total_bandwidth_used: total_bw as u64,
@@ -261,7 +283,7 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
     Ok(())
 }
 
-// Handle key registration and rotation: send nonce challenge, verify signature, create/rename user directory, send ACK or error response
+/// Handle key registration and rotation: send nonce challenge, verify signature, create/rename user directory, send ACK or error response
 async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
     writer: &mut W,
@@ -272,7 +294,7 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     use ed25519_dalek::{VerifyingKey, pkcs8::DecodePublicKey};
     use rand::Rng;
 
-    let mut nonce = vec![0u8; 2048];
+    let mut nonce = vec![0u8; 4096];
     rand::rng().fill_bytes(&mut nonce);
 
     // send nonce challenge to client for signature verification, FIRST
@@ -293,13 +315,23 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 let pub_key_pem = pub_key.to_public_key_pem(LineEnding::LF).map_err(|e| {
                     anyhow::anyhow!("Failed to convert public key to PEM format: {}", e)
                 })?;
+                let pub_key_hex = encode(pub_key_pem.as_bytes());
 
-                let keys_path = get_allowed_client_dir()
-                    .await?
-                    .join(encode(pub_key_pem.as_bytes()));
+                let auth_keys_path = get_allowed_client_dir().await?.join(&pub_key_hex);
 
-                match (*ALLOW_ALL_CLIENTS, keys_path.exists(), keys_path.is_dir()) {
+                info!("Auth attempt with new key: {}", &pub_key_hex[..16].dimmed());
+
+                // check if client is allowed (if ALLOW_ALL_CLIENTS, false) and if auth key path is valid
+                match (
+                    *ALLOW_ALL_CLIENTS,
+                    auth_keys_path.exists(),
+                    auth_keys_path.is_dir(),
+                ) {
                     (false, false, _) => {
+                        warn!(
+                            "Client with key: {} is not authorized, rejecting client storage space",
+                            &pub_key_hex[..18]
+                        );
                         send_failed(
                             writer,
                             ErrorHeader {
@@ -307,21 +339,23 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                 message: "Client not authorized, please contact the admin, provider or ssh into the server"
                                     .to_string(),
                             },
-                        )
-                            .await?;
+                        ).await?;
 
                         return Ok(());
                     }
 
                     (_, true, false) => {
+                        error!(
+                            "Auth key must be a directory for key: {}, skipping user storage space creation",
+                            &pub_key_hex[..18]
+                        );
                         send_failed(
                             writer,
                             ErrorHeader {
                                 code: 500,
-                                message: "Auth key path exists but is not a directory".to_string(),
+                                message: "Auth key path exists but is not a directory, skipping user storage dir creation".to_string(),
                             },
-                        )
-                        .await?;
+                        ).await?;
 
                         return Ok(());
                     }
@@ -331,21 +365,44 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
                 let pub_key_hash = encode(Sha256::digest(pub_key.as_bytes()));
                 let user_storage_dir = get_storage_dir().await?.join(pub_key_hash);
+                let user_key_path = auth_keys_path.join(encode(pub_key_pem.as_bytes()));
 
-                // if user_storage_dir.exists() {
-                //     send_failed(
-                //         writer,
-                //         ErrorHeader {
-                //             code: 409,
-                //             message: "User storage directory already exists, possible key collision, please contact the admin, provider or ssh".to_string(),
-                //         },
-                //     ).await?;
-                //     return Ok(());
-                // }
+                // check and return from here, no needed
+                if user_storage_dir.exists() && user_key_path.exists() {
+                    send_warn(
+                        writer,
+                        WarnHeader {
+                            code: 409,
+                            message: "Client Auth & Storage directory already exists, not required"
+                                .to_string(),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
 
-                // auto white-list
-                tokio::fs::create_dir_all(keys_path.join(encode(pub_key_pem.as_bytes()))).await?;
-                tokio::fs::create_dir_all(&user_storage_dir).await?;
+                // auto white-list if ALLOW_CLIENT false & dir not exists already
+                match (
+                    tokio::fs::create_dir_all(&user_key_path).await,
+                    tokio::fs::create_dir_all(&user_storage_dir).await,
+                ) {
+                    (Err(_), Err(_)) | (Err(_), Ok(_)) | (Ok(_), Err(_)) => {
+                        error!(
+                            "Failed to create auth key or user space for key: {}, returning back",
+                            &pub_key_hex[..18]
+                        );
+                        send_failed(
+                            writer,
+                            ErrorHeader {
+                                code: 500,
+                                message: "Failed to create auth key or user storage directory, try again later"
+                                    .to_string(),
+                            },
+                        ).await?;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
                 timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??; // ACK
             }
             Err(e) => {
@@ -363,7 +420,6 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         // Rotate existing keys
     } else if flag == 2 {
         let key_header = RotateKeyHeader::deserialize(&header_bytes)?;
-
         match key_header.validate(&nonce).await {
             Ok(user_path) => {
                 let new_pub_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
@@ -387,6 +443,12 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 let new_pub_key_hex = encode(new_pub_key_pem.as_bytes());
                 let old_pub_key_hex = encode(old_pub_key_pem.as_bytes());
 
+                info!(
+                    "Rotate key attempt: {} -> {}",
+                    &new_pub_key_hex.dimmed(),
+                    &old_pub_key_hex.dimmed()
+                );
+
                 let new_pub_key_hash = encode(Sha256::digest(new_pub_key.as_bytes()));
                 //let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
 
@@ -396,12 +458,31 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 let auth_keys_path = get_allowed_client_dir().await?;
 
                 // hope this does not fail
-                tokio::fs::rename(
-                    auth_keys_path.join(old_pub_key_hex),
-                    auth_keys_path.join(new_pub_key_hex),
-                )
-                .await?;
-                tokio::fs::rename(&user_path, &new_user_path).await?;
+                match (
+                    tokio::fs::rename(
+                        auth_keys_path.join(&old_pub_key_hex),
+                        auth_keys_path.join(&new_pub_key_hex),
+                    )
+                    .await,
+                    tokio::fs::rename(&user_path, &new_user_path).await,
+                ) {
+                    (Err(_), Err(_)) | (Err(_), Ok(_)) | (Ok(_), Err(_)) => {
+                        error!(
+                            "Failed to rotate old keys for: {}, returning back",
+                            &old_pub_key_hex
+                        );
+                        send_failed(
+                            writer,
+                            ErrorHeader {
+                                code: 500,
+                                message: "Failed to rotate keys, try again later".to_string(),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
 
                 timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??; // ACK
             }
@@ -432,7 +513,7 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-// Handle file upload: read file data, validate hash and size, save to disk, update metadata, send response
+/// Handle file upload: read file data, validate hash and size, save to disk, update metadata, send response
 async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
     writer: &mut W,
@@ -443,8 +524,8 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let file_id = headers.file_id.clone();
     let file_lock = get_file_lock(&file_id);
 
-    let _guard = match file_lock.try_write() {
-        Ok(guard) => guard,
+    let guard = match file_lock.try_write() {
+        Ok(g) => g,
         Err(_) => {
             send_failed(
                 writer,
@@ -473,7 +554,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         headers.file_hash[..8].dimmed()
     );
 
-    // Send ACK
+    // Send ACK before streaming starts
     timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??;
 
     let file = File::create(&file_path).await?;
@@ -484,7 +565,8 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     {
         while received < headers.file_size {
-            let to_read = min(buf.len(), (headers.file_size - received) as usize);
+            let remaining = (headers.file_size - received) as usize;
+            let to_read = min(buf.len(), remaining);
             let n = reader.read(&mut buf[..to_read]).await?;
             if n == 0 {
                 break;
@@ -537,7 +619,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     )
     .await?;
 
-    drop(_guard);
+    drop(guard);
     release_file_lock(&file_id);
 
     Tracker::log_upload(headers.file_size as usize).await;
@@ -545,7 +627,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-// Handle file download: validate request, read file and metadata, send file data with headers, update stats
+/// Handle file download: validate request, read file and metadata, send file data with headers, update stats
 async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     _reader: &mut R,
     writer: &mut W,
@@ -555,8 +637,8 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let file_id = headers.file_id.clone();
     let file_lock = get_file_lock(&file_id);
 
-    let _guard = match file_lock.try_read() {
-        Ok(guard) => guard,
+    let guard = match file_lock.try_read() {
+        Ok(g) => g,
         Err(_) => {
             send_failed(
                 writer,
@@ -588,6 +670,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let file_path = dir_path.join(format!("{}.file", &headers.file_id));
     let meta_path = dir_path.join(format!("{}.meta", &headers.file_id));
 
+    // TODO; should be 500?
     if !meta_path.exists() {
         warn!("Metadata not found for file_id: {}", &headers.file_id);
         send_failed(
@@ -637,10 +720,11 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     }
     .serialize()?;
 
+    // ACK before streaming
     let mut rsp = Vec::with_capacity(1 + header.len());
     rsp.push(1u8); // 1 = success;
     rsp.extend(header);
-    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??;
+    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??; // connection should be kept alive
 
     let file = File::open(&file_path).await?;
     let mut buf_file = BufReader::with_capacity(READ_CHUNK_SIZE * 2, file);
@@ -659,7 +743,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     info!("Download complete: File-ID: {}", &headers.file_id.dimmed());
 
-    drop(_guard);
+    drop(guard);
     release_file_lock(&file_id);
 
     Tracker::log_download(file_size as usize).await;
@@ -668,11 +752,10 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 }
 
 // TODO: Too many repetitive lazy code, very poor thinking, refactor later
-use ed25519_dalek::SigningKey;
 
 /// Client function to register a new public key or rotate existing keys: connect to server, perform nonce challenge, sign nonce, send key info, handle ACK or error response
 pub async fn auth_pubkey(
-    private_key: SigningKey,
+    private_key: ed25519_dalek::SigningKey,
     public_pem: &str,
     old_public_pem: Option<&str>,
     host: &str,
@@ -680,7 +763,7 @@ pub async fn auth_pubkey(
 ) -> Result<()> {
     use ed25519_dalek::Signer;
 
-    let request = Init(if old_public_pem.is_some() { 2 } else { 1 }).serialize()?;
+    let request = Command::Init(if old_public_pem.is_some() { 2 } else { 1 }).serialize()?;
 
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true).ok();
@@ -747,10 +830,13 @@ pub async fn auth_pubkey(
     if rsp[0] == 0x1u8 {
         println!("Auth successfully");
     } else if rsp[0] == 0x2u8 {
+        let warn = WarnHeader::deserialize(&rsp[1..])?;
+        println!("Auth warning: {} - {}", warn.code, warn.message);
+    } else if rsp[0] == 0x3u8 {
         let err = ErrorHeader::deserialize(&rsp[1..])?;
         anyhow::bail!("Auth failed: {} - {}", err.code, err.message);
     } else {
-        anyhow::bail!("Auth failed: Unknown reason");
+        anyhow::bail!("Invalid response from server");
     }
 
     Ok(())
@@ -798,7 +884,7 @@ pub async fn upload_client(
     pg_bar.set_style(
         ProgressStyle::default_bar()
             .template("↪ [{bar:60.blue/cyan}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
-            .progress_chars("▨>-"),
+            .progress_chars("▨◻-"),
     );
 
     let request = Command::Upload(UploadHeader {
@@ -832,9 +918,12 @@ pub async fn upload_client(
         .context("Failed to read response")?;
 
     // Reading flags early ACK
-    if response[0] == 0x2u8 {
+    if response[0] == 0x3u8 {
         let err = ErrorHeader::deserialize(&response[1..])?;
         anyhow::bail!("Upload failed: {} - {}", err.code, err.message);
+    } else if response[0] == 0x2u8 {
+        let warn = WarnHeader::deserialize(&response[1..])?;
+        println!("Upload warning: {} - {}", warn.code, warn.message);
     }
 
     let file = File::open(&file_path)
@@ -874,9 +963,12 @@ pub async fn upload_client(
         .await
         .context("Failed to read response")?;
 
-    if response[0] == 0x2u8 {
+    if response[0] == 0x3u8 {
         let err = ErrorHeader::deserialize(&response[1..])?;
         anyhow::bail!("Upload failed: {} - {}", err.code, err.message);
+    } else if response[0] == 0x2u8 {
+        let warn = WarnHeader::deserialize(&response[1..])?;
+        println!("Upload warning: {} - {}", warn.code, warn.message);
     }
 
     let rsp = UploadResponse::deserialize(&response[1..])?;
@@ -931,6 +1023,9 @@ pub async fn download_client(
     if header_bytes[0] == 0x2u8 {
         let err = ErrorHeader::deserialize(&header_bytes[1..])?;
         anyhow::bail!("Download failed: {} - {}", err.code, err.message);
+    } else if header_bytes[0] == 0x3u8 {
+        let warn = WarnHeader::deserialize(&header_bytes[1..])?;
+        println!("Download warning: {} - {}", warn.code, warn.message);
     }
 
     let response = DownloadResponse::deserialize(&header_bytes[1..])?;
@@ -945,7 +1040,7 @@ pub async fn download_client(
     pg_bar.set_style(
         ProgressStyle::default_bar()
             .template("↩ [{bar:60.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
-            .progress_chars("▨>-"),
+            .progress_chars("▨◻-"),
     );
 
     let output_path = output
@@ -959,7 +1054,8 @@ pub async fn download_client(
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
     while received < response.file_size {
-        let to_read = min(buf.len(), (response.file_size - received) as usize);
+        let remaining_bytes = (response.file_size - received) as usize;
+        let to_read = min(buf.len(), remaining_bytes);
         let n = reader
             .read(&mut buf[..to_read])
             .await

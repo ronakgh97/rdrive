@@ -100,6 +100,8 @@ pub fn validate_signature(public_pem: &str, signature: &str, nonce: &[u8]) -> Re
     Ok(())
 }
 
+// TODO; header needs a massive refactor, i'm being serious
+
 #[derive(Serialize, Deserialize)]
 pub struct UploadHeader {
     pub file_id: String,
@@ -222,9 +224,27 @@ impl ErrorHeader {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct WarnHeader {
+    pub code: u16,
+    pub message: String,
+}
+
+impl WarnHeader {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        postcard::to_allocvec(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize WarnHeader: {}", e))
+    }
+    pub fn deserialize(data: &[u8]) -> Result<Self> {
+        postcard::from_bytes(data)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize WarnHeader: {}", e))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct StatusHeader {
     pub timestamp: String,
     pub uptime_hrs: f64,
+    pub auth_client: u64,
     pub total_uploaded: u64,
     pub total_downloaded: u64,
     pub total_bandwidth_used: u64,

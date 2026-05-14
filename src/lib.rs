@@ -289,12 +289,14 @@ impl Tracker {
         let mut lock = SERVER_TRACKER.write().await;
         lock.total_bandwidth_gb += bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         lock.total_uploaded += 1;
+        drop(lock)
     }
 
     pub async fn log_download(bytes: usize) {
         let mut lock = SERVER_TRACKER.write().await;
         lock.total_bandwidth_gb += bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         lock.total_download += 1;
+        drop(lock)
     }
 }
 

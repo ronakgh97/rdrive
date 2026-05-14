@@ -4,8 +4,6 @@ use r_drive::args::{ServerArgs, ServerCommands};
 use r_drive::ascii_art;
 use r_drive::service::serve_tcp;
 use rand::RngExt;
-use std::fs;
-use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
@@ -17,8 +15,8 @@ fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
 
     tmp.set_extension(format!("tmp.{}", rand));
     {
-        let mut file =
-            File::create(&tmp).with_context(|| format!("failed to create {}", tmp.display()))?;
+        let mut file = std::fs::File::create(&tmp)
+            .with_context(|| format!("failed to create {}", tmp.display()))?;
 
         file.write_all(data)
             .with_context(|| format!("failed to write {}", tmp.display()))?;
@@ -27,7 +25,7 @@ fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
             .with_context(|| format!("failed to sync {}", tmp.display()))?;
     }
 
-    fs::rename(&tmp, target).with_context(|| {
+    std::fs::rename(&tmp, target).with_context(|| {
         format!(
             "failed to atomic rename {} to {}",
             tmp.display(),
@@ -37,7 +35,7 @@ fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
 
     // not required, but still try to sync the parent dir
     if let Some(parent) = tmp.parent() {
-        File::open(parent)?
+        std::fs::File::open(parent)?
             .sync_all()
             .with_context(|| format!("failed to sync parent dir {}", parent.display()))?;
     }
@@ -79,7 +77,7 @@ async fn main() -> Result<()> {
 #[allow(unused)]
 fn update_env(field: &str, value: &str) -> Result<bool> {
     let path = Path::new(".env");
-    let content = match fs::read_to_string(path) {
+    let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(e) => {
             anyhow::bail!("Failed to read file content: {}", e);
