@@ -25,7 +25,7 @@ pub mod protocol_v2;
 pub mod service;
 
 #[inline(always)]
-pub async fn get_storage_path() -> Result<PathBuf> {
+pub async fn get_storage_dir() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
     let storage_path = home_dir.join(".rdrive").join("storage");
@@ -34,7 +34,7 @@ pub async fn get_storage_path() -> Result<PathBuf> {
 
 // TODO: Implement public space
 #[inline(always)]
-pub async fn get_public_storage_path() -> Result<PathBuf> {
+pub async fn get_public_storage_dir() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
     let pub_storage_path = home_dir.join(".rdrive").join("storage").join("public");
@@ -42,7 +42,7 @@ pub async fn get_public_storage_path() -> Result<PathBuf> {
 }
 
 #[inline(always)]
-pub async fn get_allowed_client_path() -> Result<PathBuf> {
+pub async fn get_allowed_client_dir() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
     let allowed_clients_path = home_dir.join(".rdrive").join("authorized_keys");

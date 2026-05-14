@@ -1,7 +1,7 @@
 use r_drive::header::{
     Command, DownloadHeader, DownloadResponse, ErrorHeader, UploadHeader, UploadResponse,
 };
-use r_drive::{SERVER_TRACKER, get_storage_path};
+use r_drive::{SERVER_TRACKER, get_storage_dir};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::io::ErrorKind;
@@ -28,9 +28,7 @@ fn free_port() -> u16 {
 }
 
 async fn cleanup_storage() {
-    let path = get_storage_path()
-        .await
-        .expect("Failed to get storage path");
+    let path = get_storage_dir().await.expect("Failed to get storage path");
     if let Err(err) = tokio::fs::remove_dir_all(&path).await {
         assert_eq!(
             err.kind(),
@@ -56,7 +54,7 @@ async fn wait_for_server(port: u16) {
 }
 
 async fn start_server_v1(port: u16) -> JoinHandle<()> {
-    let path = get_storage_path().await.unwrap();
+    let path = get_storage_dir().await.unwrap();
     tokio::fs::create_dir_all(&path).await.unwrap();
 
     let handle = tokio::spawn(async move {

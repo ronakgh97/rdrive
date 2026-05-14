@@ -6,14 +6,11 @@ use crate::header::{
 use crate::{
     ACTIVE_CONNECTIONS, ALLOW_ALL_CLIENTS, MAX_CONNECTIONS, MetadataFile, NETWORK_READ_BUFFER,
     NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER, START_TIME, Tracker,
-    WRITE_TIMEOUT, debug, error, file_hasher_async, get_allowed_client_path, get_file_lock,
-    get_storage_path, info, release_file_lock, trace, try_get_uptime_hrs, warn,
+    WRITE_TIMEOUT, debug, error, file_hasher_async, get_allowed_client_dir, get_file_lock,
+    get_storage_dir, info, release_file_lock, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
-use ed25519_dalek::pkcs8::EncodePublicKey;
-use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-use ed25519_dalek::{SigningKey, VerifyingKey, pkcs8::DecodePublicKey};
 use hex::encode;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
@@ -63,7 +60,7 @@ pub async fn start_tcp_server(port: u16, storage_path: Arc<PathBuf>) -> Result<(
                 });
             }
             Err(e) => {
-                error!("Accept error: {}", e);
+                error!("Connection accept error: {}", e);
             }
         }
     }
@@ -217,6 +214,8 @@ async fn send_success<W: AsyncWriteExt + Unpin, T: Serialize>(
     Ok(())
 }
 
+// TODO: Add send_warn here
+
 // Send an error response with code and message, then close the connection
 #[inline]
 async fn send_failed<W: AsyncWriteExt + Unpin>(
@@ -268,7 +267,11 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     flag: u8,
 ) -> Result<()> {
+    use ed25519_dalek::pkcs8::EncodePublicKey;
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+    use ed25519_dalek::{VerifyingKey, pkcs8::DecodePublicKey};
     use rand::Rng;
+
     let mut nonce = vec![0u8; 2048];
     rand::rng().fill_bytes(&mut nonce);
 
@@ -285,37 +288,63 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         let key_header = NewKeyHeader::deserialize(&header_bytes)?;
         match key_header.validate(&nonce) {
             Ok(_) => {
-                use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-                let public_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
+                let pub_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
                     .map_err(|e| anyhow::anyhow!("Failed to parse public key from PEM: {}", e))?;
-                let public_key_pem = public_key.to_public_key_pem(LineEnding::LF)?;
+                let pub_key_pem = pub_key.to_public_key_pem(LineEnding::LF).map_err(|e| {
+                    anyhow::anyhow!("Failed to convert public key to PEM format: {}", e)
+                })?;
 
-                let authorized_keys = get_allowed_client_path().await?;
+                let keys_path = get_allowed_client_dir()
+                    .await?
+                    .join(encode(pub_key_pem.as_bytes()));
 
-                if !*ALLOW_ALL_CLIENTS
-                    && !authorized_keys
-                        .join(encode(public_key_pem.as_bytes()))
-                        .exists()
-                    && !authorized_keys
-                        .join(encode(public_key_pem.as_bytes()))
-                        .is_dir()
-                {
-                    send_failed(
-                        writer,
-                        ErrorHeader {
-                            code: 403,
-                            message: "Client not authorized, Please contact the admin, provider or ssh into the server".to_string(),
-                        },
-                    )
-                    .await?;
-                    return Ok(());
+                match (*ALLOW_ALL_CLIENTS, keys_path.exists(), keys_path.is_dir()) {
+                    (false, false, _) => {
+                        send_failed(
+                            writer,
+                            ErrorHeader {
+                                code: 403,
+                                message: "Client not authorized, please contact the admin, provider or ssh into the server"
+                                    .to_string(),
+                            },
+                        )
+                            .await?;
+
+                        return Ok(());
+                    }
+
+                    (_, true, false) => {
+                        send_failed(
+                            writer,
+                            ErrorHeader {
+                                code: 500,
+                                message: "Auth key path exists but is not a directory".to_string(),
+                            },
+                        )
+                        .await?;
+
+                        return Ok(());
+                    }
+
+                    _ => {}
                 }
 
-                let pub_key_hash = encode(Sha256::digest(public_key.as_bytes()));
-                let user_storage_dir = get_storage_path().await?.join(pub_key_hash);
+                let pub_key_hash = encode(Sha256::digest(pub_key.as_bytes()));
+                let user_storage_dir = get_storage_dir().await?.join(pub_key_hash);
 
-                tokio::fs::create_dir_all(authorized_keys.join(encode(public_key_pem.as_bytes())))
-                    .await?;
+                // if user_storage_dir.exists() {
+                //     send_failed(
+                //         writer,
+                //         ErrorHeader {
+                //             code: 409,
+                //             message: "User storage directory already exists, possible key collision, please contact the admin, provider or ssh".to_string(),
+                //         },
+                //     ).await?;
+                //     return Ok(());
+                // }
+
+                // auto white-list
+                tokio::fs::create_dir_all(keys_path.join(encode(pub_key_pem.as_bytes()))).await?;
                 tokio::fs::create_dir_all(&user_storage_dir).await?;
                 timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??; // ACK
             }
@@ -346,19 +375,25 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                         anyhow::anyhow!("Failed to parse old public key from PEM: {}", e)
                     })?;
 
-                let new_public_key_pem = new_pub_key.to_public_key_pem(LineEnding::LF)?;
-                let old_public_key_pem = old_pub_key.to_public_key_pem(LineEnding::LF)?;
+                let new_pub_key_pem =
+                    new_pub_key.to_public_key_pem(LineEnding::LF).map_err(|e| {
+                        anyhow::anyhow!("Failed to convert new public key to PEM format: {}", e)
+                    })?;
+                let old_pub_key_pem =
+                    old_pub_key.to_public_key_pem(LineEnding::LF).map_err(|e| {
+                        anyhow::anyhow!("Failed to convert old public key to PEM format: {}", e)
+                    })?;
 
-                let new_pub_key_hex = encode(new_public_key_pem.as_bytes());
-                let old_pub_key_hex = encode(old_public_key_pem.as_bytes());
+                let new_pub_key_hex = encode(new_pub_key_pem.as_bytes());
+                let old_pub_key_hex = encode(old_pub_key_pem.as_bytes());
 
                 let new_pub_key_hash = encode(Sha256::digest(new_pub_key.as_bytes()));
                 //let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
 
-                let new_user_path = get_storage_path().await?.join(new_pub_key_hash);
+                let new_user_path = get_storage_dir().await?.join(new_pub_key_hash);
                 //let user_path = get_storage_path().await?.join(old_pub_key_hash);
 
-                let auth_keys_path = get_allowed_client_path().await?;
+                let auth_keys_path = get_allowed_client_dir().await?;
 
                 // hope this does not fail
                 tokio::fs::rename(
@@ -633,12 +668,13 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 }
 
 // TODO: Too many repetitive lazy code, very poor thinking, refactor later
+use ed25519_dalek::SigningKey;
 
 /// Client function to register a new public key or rotate existing keys: connect to server, perform nonce challenge, sign nonce, send key info, handle ACK or error response
-pub async fn register_pubkey(
+pub async fn auth_pubkey(
     private_key: SigningKey,
     public_pem: &str,
-    old_public_pem: Option<String>,
+    old_public_pem: Option<&str>,
     host: &str,
     port: u16,
 ) -> Result<()> {
@@ -675,7 +711,7 @@ pub async fn register_pubkey(
         Some(old_public_pem) => {
             let header = RotateKeyHeader {
                 signature: encode(signature.to_bytes()),
-                old_public_pem,
+                old_public_pem: old_public_pem.to_string(),
                 new_public_pem: public_pem.to_string(),
             };
             header.serialize()?
@@ -709,7 +745,7 @@ pub async fn register_pubkey(
 
     // Reading flag for ACK or error
     if rsp[0] == 0x1u8 {
-        println!("Registered successfully");
+        println!("Auth successfully");
     } else if rsp[0] == 0x2u8 {
         let err = ErrorHeader::deserialize(&rsp[1..])?;
         anyhow::bail!("Auth failed: {} - {}", err.code, err.message);

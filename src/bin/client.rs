@@ -7,7 +7,7 @@ use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use r_drive::args::{ClientArgs, ClientCommands};
 use r_drive::crypto::generate_ed25519_keypair;
 use r_drive::protocol_v1::{
-    download_client as download_file_v1, get_server_status, register_pubkey,
+    auth_pubkey, download_client as download_file_v1, get_server_status,
     upload_client as upload_file_v1,
 };
 use r_drive::{Catalog, ascii_art, get_catalog_path, get_user_path};
@@ -29,18 +29,19 @@ async fn main() -> Result<()> {
             let private_key_path = user_path.join("private_key.pem");
             let public_key_path = user_path.join("public_key.pem");
 
-            let old_keys = if private_key_path.exists() && public_key_path.exists() {
-                Some((
+            let existing_keys = match (private_key_path.exists(), public_key_path.exists()) {
+                (true, true) => Some((
                     tokio::fs::read_to_string(&private_key_path).await?,
                     tokio::fs::read_to_string(&public_key_path).await?,
-                ))
-            } else {
-                None
+                )),
+                _ => None,
             };
 
             if rot {
-                let (old_pri, old_pub) = old_keys.context("No existing keys. Cannot rotate.")?;
-                let signing_key = SigningKey::from_pkcs8_pem(&old_pri)
+                let (old_pri_pem, old_pub_pem) =
+                    existing_keys.context("No existing keys. Cannot rotate.")?;
+
+                let signing_key = SigningKey::from_pkcs8_pem(&old_pri_pem)
                     .context("Bad private key, cannot rotate")?;
 
                 let (new_pri, new_pub) = generate_ed25519_keypair()?;
@@ -52,41 +53,61 @@ async fn main() -> Result<()> {
                     hex::encode(new_pub_pem.as_bytes()).green()
                 );
 
-                // IMPORTANT, sync the rotation with the server FIRST!
-                // If this fails, we DO NOT write to disk, saving you from a fatal desync lockout.
-                register_pubkey(signing_key, &new_pub_pem, Some(old_pub), &address, port).await?;
+                // Sync with server BEFORE writing to disk!!!
+                auth_pubkey(
+                    signing_key,
+                    &new_pub_pem,
+                    Some(&old_pub_pem),
+                    &address,
+                    port,
+                )
+                .await?;
 
+                println!("Key rotated/synced successfully");
                 tokio::fs::create_dir_all(&user_path).await?;
                 tokio::fs::write(&private_key_path, &new_pri_pem).await?;
                 tokio::fs::write(&public_key_path, &new_pub_pem).await?;
-            } else {
-                let (signing_key, pub_pem) = if let Some((pri_pem, pub_pem)) = old_keys {
+
+                return Ok(());
+            }
+
+            let (signing_key, pub_pem) = match existing_keys {
+                Some((pri_pem, pub_pem)) => {
+                    println!("Found existing keypair");
+
                     let signing_key = SigningKey::from_pkcs8_pem(&pri_pem)
                         .context("Bad private key, cannot authenticate")?;
-                    println!("Loaded existing local keypair.");
+
                     (signing_key, pub_pem)
-                } else {
-                    let (new_pri, new_pub) = generate_ed25519_keypair()?;
-                    let new_pri_pem = new_pri.to_pkcs8_pem(LineEnding::LF)?.to_string();
-                    let new_pub_pem = new_pub.to_public_key_pem(LineEnding::LF)?;
+                }
+
+                None => {
+                    let (prikey, pubkey) = generate_ed25519_keypair()?;
+
+                    let pri_pem = prikey.to_pkcs8_pem(LineEnding::LF)?.to_string();
+                    let pub_pem = pubkey.to_public_key_pem(LineEnding::LF)?;
 
                     tokio::fs::create_dir_all(&user_path).await?;
-                    tokio::fs::write(&private_key_path, &new_pri_pem).await?;
-                    tokio::fs::write(&public_key_path, &new_pub_pem).await?;
-                    println!("Generated ed22519 keypair.");
-                    (new_pri, new_pub_pem)
-                };
+                    tokio::fs::write(&private_key_path, &pri_pem).await?;
+                    tokio::fs::write(&public_key_path, &pub_pem).await?;
 
-                println!(
-                    "Public key (HEX):\n{}",
-                    hex::encode(pub_pem.as_bytes()).green()
-                );
+                    println!("Generated ed25519 keypair.");
 
-                if auth {
-                    register_pubkey(signing_key, &pub_pem, None, &address, port).await?;
-                } else {
-                    println!("Make sure to have your HEX public key whitelisted on the server");
+                    (prikey, pub_pem)
                 }
+            };
+
+            println!(
+                "Public key (HEX):\n{}",
+                hex::encode(pub_pem.as_bytes()).green()
+            );
+
+            if auth {
+                auth_pubkey(signing_key, &pub_pem, None, &address, port).await?;
+            } else {
+                println!(
+                    "Make sure to whitelist your HEX public key on the server, If not already auth"
+                );
             }
         }
         Some(ClientCommands::Push {

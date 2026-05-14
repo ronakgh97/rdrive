@@ -1,4 +1,4 @@
-use crate::{MAX_FILE_SIZE, get_storage_path};
+use crate::{MAX_FILE_SIZE, get_storage_dir};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -63,7 +63,7 @@ impl RotateKeyHeader {
             .map_err(|e| anyhow::anyhow!("Failed to parse old public key from PEM: {}", e))?;
 
         let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
-        let user_path = get_storage_path().await?.join(old_pub_key_hash);
+        let user_path = get_storage_dir().await?.join(old_pub_key_hash);
 
         if !user_path.exists() {
             return Err(anyhow::anyhow!("User not registered, not found"));

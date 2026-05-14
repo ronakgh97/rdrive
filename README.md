@@ -82,7 +82,7 @@ TODO
 - Fix the MASTER_KEY/Encrption redundancy
 - Proper secure protocol design, fuck TLS, SSL shit
 - Portable cross-lang protocol
-- Recoverable keys somehow?
+- Recoverable keys somehow?, better recover & key backups
 
 https://www.backblaze.com/docs/cloud-storage-about-backblaze-b2-cloud-storage
 
