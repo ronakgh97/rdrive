@@ -3,10 +3,10 @@ use crate::header::{
     StatusHeader, UploadHeader, UploadResponse, WarnHeader,
 };
 use crate::{
-    ACTIVE_CONNECTIONS, ALLOW_ALL_CLIENTS, MAX_CONNECTIONS, MetadataFile, NETWORK_READ_BUFFER,
-    NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER, START_TIME, Tracker,
-    WRITE_TIMEOUT, debug, error, file_hasher_async, get_allowed_client_dir, get_file_lock,
-    get_storage_dir, info, release_file_lock, trace, try_get_uptime_hrs, warn,
+    ACTIVE_CONNECTIONS, ENABLE_CLIENT_WHITELIST, MAX_CONNECTIONS, MetadataFile,
+    NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER,
+    START_TIME, Tracker, WRITE_TIMEOUT, debug, error, file_hasher_async, get_allowed_client_dir,
+    get_file_lock, get_storage_dir, info, release_file_lock, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -97,9 +97,9 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
         }
     };
     match command {
-        Command::Init(flags) => {
+        Command::Auth(flags) => {
             debug!("Received INIT request");
-            handle_keys(&mut reader, &mut writer, flags).await?;
+            handle_auth_keys(&mut reader, &mut writer, flags).await?;
             writer.flush().await?;
             Ok(())
         }
@@ -284,7 +284,7 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
 }
 
 /// Handle key registration and rotation: send nonce challenge, verify signature, create/rename user directory, send ACK or error response
-async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
     writer: &mut W,
     flag: u8,
@@ -297,6 +297,8 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let mut nonce = vec![0u8; 4096];
     rand::rng().fill_bytes(&mut nonce);
 
+    // TODO; we are sending nonce challenge regardless of authenticity of client, hmm?
+    //  will this need x25519 encryption?, I'm trying to come up with shared header flow, to reduce brain damage
     // send nonce challenge to client for signature verification, FIRST
     timeout(WRITE_TIMEOUT, write_frame(writer, &nonce)).await??;
 
@@ -323,7 +325,7 @@ async fn handle_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
                 // check if client is allowed (if ALLOW_ALL_CLIENTS, false) and if auth key path is valid
                 match (
-                    *ALLOW_ALL_CLIENTS,
+                    *ENABLE_CLIENT_WHITELIST,
                     auth_keys_path.exists(),
                     auth_keys_path.is_dir(),
                 ) {
@@ -754,7 +756,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 // TODO: Too many repetitive lazy code, very poor thinking, refactor later
 
 /// Client function to register a new public key or rotate existing keys: connect to server, perform nonce challenge, sign nonce, send key info, handle ACK or error response
-pub async fn auth_pubkey(
+pub async fn auth_client(
     private_key: ed25519_dalek::SigningKey,
     public_pem: &str,
     old_public_pem: Option<&str>,
@@ -763,7 +765,7 @@ pub async fn auth_pubkey(
 ) -> Result<()> {
     use ed25519_dalek::Signer;
 
-    let request = Command::Init(if old_public_pem.is_some() { 2 } else { 1 }).serialize()?;
+    let request = Command::Auth(if old_public_pem.is_some() { 2 } else { 1 }).serialize()?;
 
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true).ok();

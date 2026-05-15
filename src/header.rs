@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize)]
 pub enum Command {
-    Init(u8), // flags -> 1/2 = new/rotate ...bool not used, cause I don't like enum for obvious reasons
+    Auth(u8), // flags -> 1/2 = new/rotate ...bool not used, cause I don't like enum for obvious reasons
     Upload(UploadHeader),
     Download(DownloadHeader),
     Status,

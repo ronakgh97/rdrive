@@ -25,7 +25,7 @@ pub enum ServerCommands {
         #[arg(long, default_value = "v1")]
         protocol: String,
     },
-    /// Rotate ENV keys locally, (can be slow for 'obvious reason')
+    /// Rotate ed25519 keys
     Rotate {},
 }
 

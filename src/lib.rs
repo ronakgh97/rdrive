@@ -50,18 +50,25 @@ pub async fn get_allowed_client_dir() -> Result<PathBuf> {
 }
 
 #[inline]
-pub async fn get_user_path() -> Result<PathBuf> {
+pub async fn get_server_key_dir() -> Result<PathBuf> {
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
+    let server_keys_path = home_dir.join(".rdrive").join("server");
+    Ok(server_keys_path)
+}
+
+#[inline]
+pub fn get_user_key_dir() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
     let user_path = home_dir.join(".rdrive").join("user");
     Ok(user_path)
 }
 
+// TODO: should store on server
 #[inline]
 pub fn get_catalog_path() -> Result<PathBuf> {
-    let home_dir =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    let path = home_dir.join(".rdrive").join("catalog.bin");
+    let path = get_user_key_dir()?.join("catalog.map");
     Ok(path)
 }
 
@@ -213,13 +220,12 @@ impl Catalog {
 pub static START_TIME: OnceLock<chrono::DateTime<Local>> = OnceLock::new();
 pub static ACTIVE_CONNECTIONS: LazyLock<Arc<AtomicUsize>> =
     LazyLock::new(|| Arc::new(AtomicUsize::new(0)));
-pub static ALLOW_ALL_CLIENTS: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("ALLOW_ALL_CLIENTS")
+pub static ENABLE_CLIENT_WHITELIST: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("ENABLE_CLIENT_WHITELIST")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(true) // default to true
 });
-
 pub static MAX_CONNECTIONS: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("MAX_CONNECTIONS")
         .ok()
@@ -249,11 +255,6 @@ pub fn release_file_lock(file_id: &str) {
     let map = &*SHARED_FILE_LOCK;
     map.remove(file_id);
 }
-
-pub static MASTER_KEY: LazyLock<String> = LazyLock::new(|| {
-    dotenv::dotenv().ok();
-    std::env::var("MASTER_KEY").expect("MASTER_KEY environment variable must be set for encryption")
-});
 
 pub const NETWORK_READ_BUFFER: usize = 4 * 1024 * 1024;
 pub const NETWORK_WRITE_BUFFER: usize = 8 * 1024 * 1024;

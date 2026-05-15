@@ -2,30 +2,30 @@ Tweaking with Network Protocol & Security while building Amazon s3 ***COMMUNIST 
 
 `Ohh no I'm getting side-tracked by crypto shit`
 
-Features
+**Features**
 
 - file-system native database
-- super secure & decentralized `(uses ed22519 key for identify & x25519 for protocol encryption)`
+- super secure & decentralized e2e `(uses ed22519 key for identify & x25519 for protocol encryption)`
 - layering, delta transfer push/pull
 - built-in TLS'ish, server secure even on raw ip port
 - backups, versioning, secure key rotation
-- zero-trust architecture
-- fearless concurrency (very little locks freeze)
+- zero-trust architecture `(ssh like handshake)`
+- fearless concurrency `(very little locks freeze)`
 
-How to set up?
+**How to set up?**
 
 Use docker [image](https://hub.docker.com/repository/docker/ronakgh97/rdrive/general) then you can use the CLI to
 auth/push/pull files
 
 ```shell
-docker pull ronakgh97/rdrive:latest (<100 mb)
+docker pull ronakgh97/rdrive:latest (<128 mb)
 docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name rdrive ronakgh97/rdrive:latest
 ```
 
 ```shell
 # ssh into server or go into docker container, 
 # and create ~/.rdrive/authorized_keys/<hex public key> dir for whitelisting 
-# or just ALLOW_ALL_CLIENTS false
+# or just ENABLE_CLIENT_WHITELIST false
 
 rdrive key # gen ed25519 keypair, does not overwrite until you do `-r` or `-a` for first init
 Generated ed25519 keypair.
@@ -79,7 +79,7 @@ hash=16f4039ae20635e2e61db45257f2cccc9d122dcdfc7f32d89491565f5bc795a7, offset=13
 hash=346104ebf6a91848949f8f5af8bff439e58dd75854abdcf731b278bd2ce5f7a1, offset=201326592
 Hash of old file: cea79e99936ca4c3b85a144f8a542f631c4fd8a64b1368b967de57fe9252f1c2
 Layer metadata of new.tmp:
-hash=e40164c21c10e1f47c9eac7f8875796f6bbb3e2ec2a67f65911f0ce28acaae03, offset=0 # ONLY THIS LAYER CHANGED, rest are same as old.tmp, so only 1 layer needs to be uploaded
+hash=e40164c21c10e1f47c9eac7f8875796f6bbb3e2ec2a67f65911f0ce28acaae03, offset=0 # ONLY THIS LAYER CHANGED
 hash=b4661b0652c6643b7dc4db85574af237f0c855ce5b19c167e30e41f0f161013d, offset=67108864
 hash=16f4039ae20635e2e61db45257f2cccc9d122dcdfc7f32d89491565f5bc795a7, offset=134217728
 hash=346104ebf6a91848949f8f5af8bff439e58dd75854abdcf731b278bd2ce5f7a1, offset=201326592

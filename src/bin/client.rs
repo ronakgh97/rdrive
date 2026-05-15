@@ -7,10 +7,10 @@ use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use r_drive::args::{ClientArgs, ClientCommands};
 use r_drive::crypto::generate_ed25519_keypair;
 use r_drive::protocol_v1::{
-    auth_pubkey, download_client as download_file_v1, get_server_status,
+    auth_client, download_client as download_file_v1, get_server_status,
     upload_client as upload_file_v1,
 };
-use r_drive::{Catalog, ascii_art, get_catalog_path, get_user_path};
+use r_drive::{Catalog, ascii_art, get_catalog_path, get_user_key_dir};
 use std::io;
 use uuid::Uuid;
 
@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
             rot,
             auth,
         }) => {
-            let user_path = get_user_path().await?;
+            let user_path = get_user_key_dir()?;
             let private_key_path = user_path.join("private_key.pem");
             let public_key_path = user_path.join("public_key.pem");
 
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
                     .context("Bad private key, cannot rotate")?;
 
                 let (new_pri, new_pub) = generate_ed25519_keypair()?;
-                let new_pri_pem = new_pri.to_pkcs8_pem(LineEnding::LF)?.to_string();
+                let new_pri_pem = new_pri.to_pkcs8_pem(LineEnding::LF)?;
                 let new_pub_pem = new_pub.to_public_key_pem(LineEnding::LF)?;
 
                 println!(
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
                 );
 
                 // Try sync with server BEFORE writing to disk!!!
-                auth_pubkey(
+                auth_client(
                     signing_key,
                     &new_pub_pem,
                     Some(&old_pub_pem),
@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
             );
 
             if auth {
-                auth_pubkey(signing_key, &pub_pem, None, &address, port).await?;
+                auth_client(signing_key, &pub_pem, None, &address, port).await?;
             } else {
                 println!(
                     "Make sure to whitelist your HEX public key on the server, If not already auth"

@@ -1,11 +1,65 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use colored::Colorize;
+use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use r_drive::args::{ServerArgs, ServerCommands};
-use r_drive::ascii_art;
+use r_drive::crypto::generate_ed25519_keypair;
 use r_drive::service::serve_tcp;
+use r_drive::{ascii_art, get_server_key_dir};
 use rand::RngExt;
 use std::io::Write;
 use std::path::Path;
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 24)]
+async fn main() -> Result<()> {
+    let args = ServerArgs::parse();
+
+    match args.command {
+        Some(ServerCommands::Serve { port, protocol }) => match protocol.as_str() {
+            "v1" => {
+                let key_path = get_server_key_dir().await?;
+
+                let (pri_key, pub_key) =
+                    (key_path.join("private.pem"), key_path.join("public.pem"));
+
+                match (pri_key.exists(), pub_key.exists()) {
+                    (true, true) => {
+                        print!("{}", tokio::fs::read_to_string(&pub_key).await?.cyan());
+                    }
+                    (false, false) | (true, false) | (false, true) => {
+                        let (new_pri, new_pub) = generate_ed25519_keypair()?;
+                        let new_pri_pem = new_pri.to_pkcs8_pem(LineEnding::LF)?;
+                        let new_pub_pem = new_pub.to_public_key_pem(LineEnding::LF)?;
+
+                        tokio::fs::create_dir_all(&key_path).await?;
+                        tokio::fs::write(&pri_key, &new_pri_pem).await?;
+                        tokio::fs::write(&pub_key, &new_pub_pem).await?;
+                        print!("{}", tokio::fs::read_to_string(&pub_key).await?.cyan());
+                    }
+                }
+                serve_tcp(Some(port)).await?;
+            }
+            "v2" => {
+                println!("WIP: UDP protocol is not implemented yet, falling back to TCP");
+                serve_tcp(Some(port)).await?;
+            }
+            _ => {
+                println!("Unknown protocol: {}", protocol);
+                std::process::exit(1);
+            }
+        },
+        Some(ServerCommands::Rotate { .. }) => {
+            println!("WIP: Key rotation is not implemented yet");
+            std::process::exit(1);
+        }
+        None => {
+            ascii_art();
+        }
+    }
+
+    Ok(())
+}
 
 #[allow(unused)]
 fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
@@ -33,7 +87,7 @@ fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
         )
     })?;
 
-    // not required, but still try to sync the parent dir
+    // sync parent if any, anyway
     if let Some(parent) = tmp.parent() {
         std::fs::File::open(parent)?
             .sync_all()
@@ -43,37 +97,7 @@ fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 24)]
-async fn main() -> Result<()> {
-    let args = ServerArgs::parse();
-
-    match args.command {
-        Some(ServerCommands::Serve { port, protocol }) => match protocol.as_str() {
-            "v1" => {
-                serve_tcp(Some(port)).await?;
-            }
-            "v2" => {
-                println!("WIP: UDP protocol is not implemented yet, falling back to TCP");
-                serve_tcp(Some(port)).await?;
-            }
-            _ => {
-                println!("Unknown protocol: {}", protocol);
-                std::process::exit(1);
-            }
-        },
-        // TODO: Issue with file-lock for some reason
-        Some(ServerCommands::Rotate { .. }) => {
-            println!("WIP: Key rotation is not implemented yet");
-            std::process::exit(1);
-        }
-        None => {
-            ascii_art();
-        }
-    }
-
-    Ok(())
-}
-
+/// TODO: Thought `Lazy lock` was hot-reloads env var, apparantly its not, this is reduntant now
 #[allow(unused)]
 fn update_env(field: &str, value: &str) -> Result<bool> {
     let path = Path::new(".env");

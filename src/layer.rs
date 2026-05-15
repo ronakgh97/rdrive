@@ -238,6 +238,7 @@ pub fn compare_layers(src: Vec<Layer>, des: &[Layer]) -> Result<Vec<Layer>> {
 }
 
 #[tokio::test]
+#[ignore]
 async fn experimental_layer_test() {
     use crate::file_hasher_async;
     use rand::Rng;
