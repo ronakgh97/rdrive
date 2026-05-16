@@ -5,8 +5,8 @@ use crate::header::{
 use crate::{
     ACTIVE_CONNECTIONS, ENABLE_CLIENT_WHITELIST, MAX_CONNECTIONS, MetadataFile,
     NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER,
-    START_TIME, Tracker, WRITE_TIMEOUT, debug, error, file_hasher_async, get_allowed_client_dir,
-    get_file_lock, get_storage_dir, info, release_file_lock, trace, try_get_uptime_hrs, warn,
+    START_TIME, Tracker, WRITE_TIMEOUT, debug, error, file_hasher_async, get_authorized_client_dir,
+    get_storage_dir, hold_file_lock, info, release_file_lock, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -70,6 +70,11 @@ pub async fn start_tcp_server(port: u16, storage_path: Arc<PathBuf>) -> Result<(
 async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result<()> {
     stream.set_nodelay(true).ok();
     let (mut reader, mut writer) = stream.split();
+
+    // starts init common handshake
+    // client connects, we immediately send server pub_key,
+    // let client verify authenticity of server
+    // then key exchange
 
     let start_time = Instant::now();
     let command = match read_headers(&mut reader).await {
@@ -319,7 +324,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 })?;
                 let pub_key_hex = encode(pub_key_pem.as_bytes());
 
-                let auth_keys_path = get_allowed_client_dir().await?.join(&pub_key_hex);
+                let auth_keys_path = get_authorized_client_dir().await?.join(&pub_key_hex);
 
                 info!("Auth attempt with new key: {}", &pub_key_hex[..16].dimmed());
 
@@ -457,7 +462,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 let new_user_path = get_storage_dir().await?.join(new_pub_key_hash);
                 //let user_path = get_storage_path().await?.join(old_pub_key_hash);
 
-                let auth_keys_path = get_allowed_client_dir().await?;
+                let auth_keys_path = get_authorized_client_dir().await?;
 
                 // hope this does not fail
                 match (
@@ -524,7 +529,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     storage_path: &Path,
 ) -> Result<()> {
     let file_id = headers.file_id.clone();
-    let file_lock = get_file_lock(&file_id);
+    let file_lock = hold_file_lock(&file_id);
 
     let guard = match file_lock.try_write() {
         Ok(g) => g,
@@ -637,7 +642,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     storage_path: &Path,
 ) -> Result<()> {
     let file_id = headers.file_id.clone();
-    let file_lock = get_file_lock(&file_id);
+    let file_lock = hold_file_lock(&file_id);
 
     let guard = match file_lock.try_read() {
         Ok(g) => g,
@@ -778,14 +783,8 @@ pub async fn auth_client(
     writer.write_all(&request).await?;
     writer.flush().await.context("Failed to flush request")?;
 
-    let mut len_buf = [0u8; 4];
-    reader
-        .read_exact(&mut len_buf)
-        .await
-        .context("Failed to read response length")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    let mut nonce = vec![0u8; len];
+    let len_buf = read_frame_length(&mut reader).await? as usize;
+    let mut nonce = vec![0u8; len_buf];
     reader
         .read_exact(&mut nonce)
         .await
@@ -815,14 +814,8 @@ pub async fn auth_client(
     writer.write_all(&header_bytes).await?;
     writer.flush().await?;
 
-    let mut len_buf = [0u8; 4];
-    reader
-        .read_exact(&mut len_buf)
-        .await
-        .context("Failed to read response length")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    let mut rsp = vec![0u8; len];
+    let len_buf = read_frame_length(&mut reader).await? as usize;
+    let mut rsp = vec![0u8; len_buf];
     reader
         .read_exact(&mut rsp)
         .await
@@ -906,14 +899,8 @@ pub async fn upload_client(
     writer.write_all(&request).await?;
     writer.flush().await.context("Failed to flush request")?;
 
-    let mut len_buf = [0u8; 4];
-    reader
-        .read_exact(&mut len_buf)
-        .await
-        .context("Failed to read response length")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    let mut response = vec![0u8; len];
+    let len_buf = read_frame_length(&mut reader).await? as usize;
+    let mut response = vec![0u8; len_buf];
     reader
         .read_exact(&mut response)
         .await
@@ -952,14 +939,8 @@ pub async fn upload_client(
     pg_bar.finish_and_clear();
     writer.flush().await.context("Failed to flush")?;
 
-    let mut len_buf = [0u8; 4];
-    reader
-        .read_exact(&mut len_buf)
-        .await
-        .context("Failed to read response length")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    let mut response = vec![0u8; len];
+    let len_buf = read_frame_length(&mut reader).await? as usize;
+    let mut response = vec![0u8; len_buf];
     reader
         .read_exact(&mut response)
         .await
@@ -1008,14 +989,8 @@ pub async fn download_client(
     writer.write_all(&request).await?;
     writer.flush().await.context("Failed to flush request")?;
 
-    let mut len_buf = [0u8; 4];
-    reader
-        .read_exact(&mut len_buf)
-        .await
-        .context("Failed to read header length")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    let mut header_bytes = vec![0u8; len];
+    let len_buf = read_frame_length(&mut reader).await? as usize;
+    let mut header_bytes = vec![0u8; len_buf];
     reader
         .read_exact(&mut header_bytes)
         .await
@@ -1104,14 +1079,8 @@ pub async fn get_server_status(host: &str, port: u16) -> Result<StatusHeader> {
     writer.write_all(&request).await?;
     writer.flush().await.context("Failed to flush request")?;
 
-    let mut len_buf = [0u8; 4];
-    reader
-        .read_exact(&mut len_buf)
-        .await
-        .context("Failed to read response length")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    let mut response = vec![0u8; len];
+    let len_buf = read_frame_length(&mut reader).await? as usize;
+    let mut response = vec![0u8; len_buf];
     reader
         .read_exact(&mut response)
         .await

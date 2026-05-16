@@ -1,5 +1,5 @@
 use crate::protocol_v1::start_tcp_server;
-use crate::{get_allowed_client_dir, get_storage_dir};
+use crate::{get_authorized_client_dir, get_storage_dir};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ pub async fn serve_tcp(port: Option<u16>) -> Result<()> {
     let storage_path: PathBuf = get_storage_dir().await?;
     tokio::fs::create_dir_all(&storage_path).await?;
 
-    let authorised_client = get_allowed_client_dir().await?;
+    let authorised_client = get_authorized_client_dir().await?;
     tokio::fs::create_dir_all(&authorised_client).await?;
 
     start_tcp_server(port, Arc::new(storage_path)).await?;

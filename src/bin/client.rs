@@ -143,18 +143,9 @@ async fn main() -> Result<()> {
                 .to_string_lossy()
                 .to_string();
 
+            // read existing or create new
             let catalog_path = get_catalog_path()?;
-            let catalog_dir = catalog_path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?;
-            tokio::fs::create_dir_all(catalog_dir).await?;
-
-            // Read existing or new
-            let mut catalog = if catalog_path.exists() {
-                Catalog::read(&catalog_path).await?
-            } else {
-                Catalog::default()
-            };
+            let mut catalog = Catalog::read_or_create(&catalog_path).await?;
 
             let file_id = if let Some(tracked) = catalog.file_index.get(&file_name) {
                 for (i, uuid) in tracked.iter().enumerate() {
@@ -249,7 +240,7 @@ async fn main() -> Result<()> {
                     let catalog_path = get_catalog_path()?;
 
                     if catalog_path.exists() {
-                        let mut catalog = Catalog::read(&catalog_path).await?;
+                        let mut catalog = Catalog::read_or_create(&catalog_path).await?;
                         catalog.update_on_pull(&catalog_path, &file_id).await?;
                     }
                 }
@@ -272,7 +263,7 @@ async fn main() -> Result<()> {
             todo!("Non-trivial to implement this feature")
         }
         Some(ClientCommands::Ls { .. }) => {
-            let file_map = Catalog::read(&get_catalog_path()?).await.map_err(|e| {
+            let file_map = Catalog::read_or_create(&get_catalog_path()?).await.map_err(|e| {
                 anyhow::anyhow!(
                     "Failed to read catalog, make sure to push at least one file before listing: {}",
                     e

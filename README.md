@@ -1,16 +1,22 @@
 Tweaking with Network Protocol & Security while building Amazon s3 ***COMMUNIST VERSION***
 
-`Ohh no I'm getting side-tracked by crypto shit`
+`Goal: Protect servers from 'bad' users. Protect users from 'bad' servers`
 
 **Features**
 
 - file-system native database
-- super secure & decentralized e2e `(uses ed22519 key for identify & x25519 for protocol encryption)`
+- super secure & decentralized e2e `(uses ed22519 key for identify & x25519 for encryption)`
 - layering, delta transfer push/pull
 - built-in TLS'ish, server secure even on raw ip port
 - backups, versioning, secure key rotation
 - zero-trust architecture `(ssh like handshake)`
 - fearless concurrency `(very little locks freeze)`
+
+**Limitations**
+
+- vulnerable to path injection `(maybe have some edge cases)`
+- first connection not secure `(user must trust the server first)`
+- no recovery keys
 
 **How to set up?**
 

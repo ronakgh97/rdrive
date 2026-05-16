@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     match args.command {
         Some(ServerCommands::Serve { port, protocol }) => match protocol.as_str() {
             "v1" => {
-                let key_path = get_server_key_dir().await?;
+                let key_path = get_server_key_dir()?;
 
                 let (pri_key, pub_key) =
                     (key_path.join("private.pem"), key_path.join("public.pem"));

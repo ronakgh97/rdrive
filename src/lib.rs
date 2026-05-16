@@ -42,7 +42,7 @@ pub async fn get_public_storage_dir() -> Result<PathBuf> {
 }
 
 #[inline(always)]
-pub async fn get_allowed_client_dir() -> Result<PathBuf> {
+pub async fn get_authorized_client_dir() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
     let allowed_clients_path = home_dir.join(".rdrive").join("authorized_keys");
@@ -50,7 +50,7 @@ pub async fn get_allowed_client_dir() -> Result<PathBuf> {
 }
 
 #[inline]
-pub async fn get_server_key_dir() -> Result<PathBuf> {
+pub fn get_server_key_dir() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
     let server_keys_path = home_dir.join(".rdrive").join("server");
@@ -69,6 +69,11 @@ pub fn get_user_key_dir() -> Result<PathBuf> {
 #[inline]
 pub fn get_catalog_path() -> Result<PathBuf> {
     let path = get_user_key_dir()?.join("catalog.map");
+    Ok(path)
+}
+
+pub fn get_authorized_server_map_path() -> Result<PathBuf> {
+    let path = get_user_key_dir()?.join("server.map");
     Ok(path)
 }
 
@@ -145,7 +150,7 @@ impl MetadataFile {
 }
 
 #[derive(Deserialize, Serialize, Default)]
-pub struct FileInfo {
+pub struct FileHistory {
     pub name: String,
     pub last_push: String,
     pub last_pull: String,
@@ -153,12 +158,12 @@ pub struct FileInfo {
 
 #[derive(Deserialize, Serialize, Default)]
 pub struct Catalog {
-    pub file_map: HashMap<String, FileInfo>,
+    pub file_map: HashMap<String, FileHistory>,
     pub file_index: HashMap<String, Vec<String>>,
 }
 
 impl Catalog {
-    pub async fn read(path: &PathBuf) -> Result<Self> {
+    async fn read(path: &PathBuf) -> Result<Self> {
         use postcard::from_bytes;
 
         let file = tokio::fs::read(path).await?;
@@ -166,7 +171,22 @@ impl Catalog {
         Ok(catalog)
     }
 
-    pub async fn write(&mut self, path: &PathBuf) -> Result<()> {
+    pub async fn read_or_create(path: &PathBuf) -> Result<Self> {
+        let catalog_dir = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?;
+        tokio::fs::create_dir_all(catalog_dir).await?;
+
+        // Read existing or new
+        let catalog = match path.exists() {
+            true => Self::read(path).await?,
+            false => Self::default(),
+        };
+
+        Ok(catalog)
+    }
+
+    async fn write(&mut self, path: &PathBuf) -> Result<()> {
         use postcard::to_allocvec;
 
         let bytes = to_allocvec(self)?;
@@ -188,7 +208,7 @@ impl Catalog {
             .and_modify(|meta| {
                 meta.last_push = timestamp.clone();
             })
-            .or_insert_with(|| FileInfo {
+            .or_insert_with(|| FileHistory {
                 name: file_name.to_string(),
                 last_push: timestamp.clone(),
                 last_pull: "never".to_string(),
@@ -217,6 +237,39 @@ impl Catalog {
     }
 }
 
+#[derive(Deserialize, Serialize, Default)]
+pub struct AuthServerMap {
+    /// Map -> (Host/IP, pubkey_hex)
+    pub server_map: HashMap<String, String>,
+}
+
+impl AuthServerMap {
+    pub async fn read_or_create(path: &PathBuf) -> Result<Self> {
+        let server_map = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Invalid server map path"))?;
+        tokio::fs::create_dir_all(server_map).await?;
+
+        let map = match path.exists() {
+            true => {
+                let str = tokio::fs::read_to_string(&path).await?;
+                serde_json::from_str(str.as_str())
+                    .map_err(|e| anyhow::anyhow!("Failed to parse server map JSON: {}", e))?
+            }
+            false => Self::default(),
+        };
+
+        Ok(map)
+    }
+
+    pub async fn write(&mut self, path: &PathBuf) -> Result<()> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize server map to JSON: {}", e))?;
+        tokio::fs::write(path, json).await?;
+        Ok(())
+    }
+}
+
 pub static START_TIME: OnceLock<chrono::DateTime<Local>> = OnceLock::new();
 pub static ACTIVE_CONNECTIONS: LazyLock<Arc<AtomicUsize>> =
     LazyLock::new(|| Arc::new(AtomicUsize::new(0)));
@@ -226,6 +279,53 @@ pub static ENABLE_CLIENT_WHITELIST: LazyLock<bool> = LazyLock::new(|| {
         .and_then(|s| s.parse().ok())
         .unwrap_or(true) // default to true
 });
+
+pub static SERVER_PUB_KEY_PEM: LazyLock<String> = LazyLock::new(|| {
+    let pubkey = get_server_key_dir()
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{}",
+                format!("Failed to get server key directory: {}", e)
+                    .red()
+                    .bold()
+            );
+            std::process::exit(1);
+        })
+        .join("public.pem");
+    std::fs::read_to_string(pubkey).unwrap_or_else(|e| {
+        eprintln!(
+            "{}",
+            format!("Failed to read server public key: {}", e)
+                .red()
+                .bold()
+        );
+        std::process::exit(1);
+    })
+});
+
+pub static SERVER_PRI_KEY_PEM: LazyLock<String> = LazyLock::new(|| {
+    let prikey = get_server_key_dir()
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{}",
+                format!("Failed to get server key directory: {}", e)
+                    .red()
+                    .bold()
+            );
+            std::process::exit(1);
+        })
+        .join("private.pem");
+    std::fs::read_to_string(prikey).unwrap_or_else(|e| {
+        eprintln!(
+            "{}",
+            format!("Failed to read server private key: {}", e)
+                .red()
+                .bold()
+        );
+        std::process::exit(1);
+    })
+});
+
 pub static MAX_CONNECTIONS: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("MAX_CONNECTIONS")
         .ok()
@@ -243,7 +343,7 @@ pub static SHARED_FILE_LOCK: LazyLock<Arc<DashMap<String, Arc<RwLock<()>>>>> =
     LazyLock::new(|| Arc::new(DashMap::new()));
 
 #[inline(always)]
-pub fn get_file_lock(file_id: &str) -> Arc<RwLock<()>> {
+pub fn hold_file_lock(file_id: &str) -> Arc<RwLock<()>> {
     let map = &*SHARED_FILE_LOCK;
     map.entry(file_id.to_string())
         .or_insert_with(|| Arc::new(RwLock::new(())))
