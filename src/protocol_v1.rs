@@ -10,6 +10,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use hex::encode;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
@@ -66,15 +67,29 @@ pub async fn start_tcp_server(port: u16, storage_path: Arc<PathBuf>) -> Result<(
 }
 
 /// Handle a single client connection, read command and dispatch to appropriate handler
-#[inline(always)]
+#[inline]
 async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result<()> {
     stream.set_nodelay(true).ok();
     let (mut reader, mut writer) = stream.split();
 
-    // starts init common handshake
-    // client connects, we immediately send server pub_key,
-    // let client verify authenticity of server
-    // then key exchange
+    //------
+
+    // starts init common handshake, goal is secure tunnel, where server is auth by client.
+    // client connects, we immediately do x22519 exchange, and question authenticity later
+    // flow; client [nonce + x25519] to server ->
+    // server sign[ nonce_c + ed25519 + x25519] (ed25519 + x25519) to client {sign all that will be immune to MITM}->
+    // client either drop tcp on invalid signature/disapprove or move on with whatever handler
+    // both compute shared secret, encrypted channel
+
+    // from here client must have trust server
+    // now we check client authenticity, BUT actually, I guess
+    // we don't need to, because client need to pass AUTH header and create their user-space
+    // TODO: I might be wrong about the design, or for now, let trust client,
+    //  but maybe we can least check whitelist right there
+    //  and do not create user-space, argh... transport layer logic colliding with application logic
+    //  anyway, this is becoming ssh handshake
+
+    //------
 
     let start_time = Instant::now();
     let command = match read_headers(&mut reader).await {
@@ -294,16 +309,17 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     flag: u8,
 ) -> Result<()> {
+    use ed25519_dalek::VerifyingKey;
     use ed25519_dalek::pkcs8::EncodePublicKey;
     use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-    use ed25519_dalek::{VerifyingKey, pkcs8::DecodePublicKey};
     use rand::Rng;
 
     let mut nonce = vec![0u8; 4096];
     rand::rng().fill_bytes(&mut nonce);
 
     // TODO; we are sending nonce challenge regardless of authenticity of client, hmm?
-    //  will this need x25519 encryption?, I'm trying to come up with shared header flow, to reduce brain damage
+    //  will this need x25519 encryption? (app level or network level?),
+    //  I'm trying to come up with shared header flow, to reduce brain damage
     // send nonce challenge to client for signature verification, FIRST
     timeout(WRITE_TIMEOUT, write_frame(writer, &nonce)).await??;
 
@@ -317,18 +333,21 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         let key_header = NewKeyHeader::deserialize(&header_bytes)?;
         match key_header.validate(&nonce) {
             Ok(_) => {
-                let pub_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
-                    .map_err(|e| anyhow::anyhow!("Failed to parse public key from PEM: {}", e))?;
+                let pub_key =
+                    VerifyingKey::from_bytes(&key_header.new_public_bytes).map_err(|e| {
+                        anyhow::anyhow!("Failed to construct public key from bytes: {}", e)
+                    })?;
                 let pub_key_pem = pub_key.to_public_key_pem(LineEnding::LF).map_err(|e| {
                     anyhow::anyhow!("Failed to convert public key to PEM format: {}", e)
                 })?;
+                // hex because we want human-readable
                 let pub_key_hex = encode(pub_key_pem.as_bytes());
 
                 let auth_keys_path = get_authorized_client_dir().await?.join(&pub_key_hex);
 
                 info!("Auth attempt with new key: {}", &pub_key_hex[..16].dimmed());
 
-                // check if client is allowed (if ALLOW_ALL_CLIENTS, false) and if auth key path is valid
+                // check if client is allowed (if ENABLE_CLIENT_WHITELIST, false) and if auth key path is valid
                 match (
                     *ENABLE_CLIENT_WHITELIST,
                     auth_keys_path.exists(),
@@ -369,7 +388,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
                     _ => {}
                 }
-
+                // hash collision free
                 let pub_key_hash = encode(Sha256::digest(pub_key.as_bytes()));
                 let user_storage_dir = get_storage_dir().await?.join(pub_key_hash);
                 let user_key_path = auth_keys_path.join(encode(pub_key_pem.as_bytes()));
@@ -429,13 +448,13 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         let key_header = RotateKeyHeader::deserialize(&header_bytes)?;
         match key_header.validate(&nonce).await {
             Ok(user_path) => {
-                let new_pub_key = VerifyingKey::from_public_key_pem(&key_header.new_public_pem)
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to parse new public key from PEM: {}", e)
+                let new_pub_key =
+                    VerifyingKey::from_bytes(&key_header.new_public_bytes).map_err(|e| {
+                        anyhow::anyhow!("Failed to construct new public key from bytes: {}", e)
                     })?;
-                let old_pub_key = VerifyingKey::from_public_key_pem(&key_header.old_public_pem)
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to parse old public key from PEM: {}", e)
+                let old_pub_key =
+                    VerifyingKey::from_bytes(&key_header.old_public_bytes).map_err(|e| {
+                        anyhow::anyhow!("Failed to construct old public key from bytes: {}", e)
                     })?;
 
                 let new_pub_key_pem =
@@ -452,8 +471,8 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
                 info!(
                     "Rotate key attempt: {} -> {}",
-                    &new_pub_key_hex.dimmed(),
-                    &old_pub_key_hex.dimmed()
+                    &new_pub_key_hex[..16].dimmed(),
+                    &old_pub_key_hex[..16].dimmed()
                 );
 
                 let new_pub_key_hash = encode(Sha256::digest(new_pub_key.as_bytes()));
@@ -762,15 +781,15 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
 /// Client function to register a new public key or rotate existing keys: connect to server, perform nonce challenge, sign nonce, send key info, handle ACK or error response
 pub async fn auth_client(
-    private_key: ed25519_dalek::SigningKey,
-    public_pem: &str,
-    old_public_pem: Option<&str>,
+    private_key: SigningKey,
+    verifying_key: VerifyingKey,
+    old_verifying_key: Option<VerifyingKey>,
     host: &str,
     port: u16,
 ) -> Result<()> {
     use ed25519_dalek::Signer;
 
-    let request = Command::Auth(if old_public_pem.is_some() { 2 } else { 1 }).serialize()?;
+    let request = Command::Auth(if old_verifying_key.is_some() { 2 } else { 1 }).serialize()?;
 
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true).ok();
@@ -790,20 +809,21 @@ pub async fn auth_client(
         .await
         .context("Failed to read response")?;
 
-    let signature = private_key.sign(&nonce);
-    let header_bytes = match old_public_pem {
-        Some(old_public_pem) => {
+    //TODO: we may add some bullshit to nonce, when full protocol is implemented
+    let signature = private_key.sign(&Sha256::digest(&nonce));
+    let header_bytes = match old_verifying_key {
+        Some(old_verifying_key) => {
             let header = RotateKeyHeader {
-                signature: encode(signature.to_bytes()),
-                old_public_pem: old_public_pem.to_string(),
-                new_public_pem: public_pem.to_string(),
+                signature: signature.to_bytes(),
+                old_public_bytes: old_verifying_key.to_bytes(),
+                new_public_bytes: verifying_key.to_bytes(),
             };
             header.serialize()?
         }
         None => {
             let header = NewKeyHeader {
-                signature: encode(signature.to_bytes()),
-                new_public_pem: public_pem.to_string(),
+                signature: signature.to_bytes(),
+                new_public_bytes: verifying_key.to_bytes(),
             };
             header.serialize()?
         }

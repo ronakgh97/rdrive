@@ -39,6 +39,7 @@ dirs = "6.0.0"
 dotenv = "0.15.0"
 hex = "0.4.3"
 serde = { version = "1.0.228", features = ["derive"] }
+serde-big-array = "0.5.1"
 dashmap = "7.0.0-rc2"
 sha2 = "0.11.0"
 uuid = { version = "1.23.1", features = ["v4"] }

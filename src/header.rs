@@ -1,7 +1,43 @@
 use crate::{MAX_FILE_SIZE, get_storage_dir};
 use anyhow::Result;
+use postcard::from_bytes;
+use postcard::to_allocvec;
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use std::path::PathBuf;
+
+#[derive(Serialize, Deserialize)]
+pub struct ClientHello {
+    pub x22519_key: [u8; 32],
+    #[serde(with = "BigArray")]
+    pub signature: [u8; 64],
+}
+
+impl ClientHello {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
+    }
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        from_bytes(bytes).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ServerHello {
+    pub ed25519_key: [u8; 32],
+    pub x22519_key: [u8; 32],
+    #[serde(with = "BigArray")]
+    pub signature: [u8; 64],
+}
+
+impl ServerHello {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
+    }
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        from_bytes(bytes).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub enum Command {
@@ -13,54 +49,51 @@ pub enum Command {
 
 impl Command {
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        postcard::to_allocvec(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize Command: {}", e))
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
-        postcard::from_bytes(bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize Command: {}", e))
+        from_bytes(bytes).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
     }
 }
 
-use ed25519_dalek::pkcs8::DecodePublicKey;
 use ed25519_dalek::{Verifier, VerifyingKey};
 use hex::encode;
 use sha2::{Digest, Sha256};
 
 #[derive(Serialize, Deserialize)]
 pub struct NewKeyHeader {
-    pub signature: String,
-    pub new_public_pem: String,
+    #[serde(with = "BigArray")]
+    pub signature: [u8; 64],
+    pub new_public_bytes: [u8; 32],
 }
 
 impl NewKeyHeader {
     pub fn validate(&self, nonce: &[u8]) -> Result<()> {
-        validate_signature(&self.new_public_pem, &self.signature, nonce)?;
+        validate_signature(&self.new_public_bytes, &self.signature, nonce)?;
         Ok(())
     }
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        postcard::to_allocvec(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize InitHeader: {}", e))
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        postcard::from_bytes(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize InitHeader: {}", e))
+        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
     }
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct RotateKeyHeader {
-    pub signature: String,
-    pub old_public_pem: String,
-    pub new_public_pem: String,
+    #[serde(with = "BigArray")]
+    pub signature: [u8; 64],
+    pub old_public_bytes: [u8; 32],
+    pub new_public_bytes: [u8; 32],
 }
 
 impl RotateKeyHeader {
     /// Validates the signature and checks if the old public key is registered. Returns the user path if valid.
     pub async fn validate(&self, nonce: &[u8]) -> Result<PathBuf> {
-        let old_pub_key = VerifyingKey::from_public_key_pem(&self.old_public_pem)
-            .map_err(|e| anyhow::anyhow!("Failed to parse old public key from PEM: {}", e))?;
+        let old_pub_key = VerifyingKey::from_bytes(&self.old_public_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to construct old public key from bytes: {}", e))?;
 
         let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
         let user_path = get_storage_dir().await?.join(old_pub_key_hash);
@@ -69,39 +102,37 @@ impl RotateKeyHeader {
             return Err(anyhow::anyhow!("User not registered, not found"));
         }
 
-        validate_signature(&self.old_public_pem, &self.signature, nonce)?;
+        validate_signature(&self.old_public_bytes, &self.signature, nonce)?;
         Ok(user_path)
     }
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        postcard::to_allocvec(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize RotateKeyHeader: {}", e))
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        postcard::from_bytes(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize RotateKeyHeader: {}", e))
+        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
     }
 }
 
 #[inline(always)]
-pub fn validate_signature(public_pem: &str, signature: &str, nonce: &[u8]) -> Result<()> {
-    let signature_bytes = hex::decode(signature)
-        .map_err(|e| anyhow::anyhow!("Failed to decode signature from hex: {}", e))?;
-    let signature = ed25519_dalek::Signature::try_from(&signature_bytes[..])
-        .map_err(|e| anyhow::anyhow!("Failed to parse signature: {}", e))?;
+pub fn validate_signature(
+    public_bytes: &[u8; 32],
+    signature_bytes: &[u8; 64],
+    nonce: &[u8],
+) -> Result<()> {
+    let signature = ed25519_dalek::Signature::from_bytes(signature_bytes);
 
-    let public_key = VerifyingKey::from_public_key_pem(public_pem)
-        .map_err(|e| anyhow::anyhow!("Failed to decode public key from PEM: {}", e))?;
+    let public_key = VerifyingKey::from_bytes(public_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to construct public key from bytes: {}", e))?;
 
     public_key
-        .verify(nonce, &signature)
+        .verify(&Sha256::digest(nonce), &signature)
         .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
 
     Ok(())
 }
 
-// TODO; header needs a massive refactor, i'm being serious
-
+// TODO; header needs a massive refactor, I'm being serious
 #[derive(Serialize, Deserialize)]
 pub struct UploadHeader {
     pub file_id: String,
@@ -113,13 +144,11 @@ pub struct UploadHeader {
 
 impl UploadHeader {
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        postcard::to_allocvec(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize UploadHeader: {}", e))
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        postcard::from_bytes(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize UploadHeader: {}", e))
+        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -148,6 +177,7 @@ impl UploadHeader {
     }
 }
 
+// TODO: this feels redundant
 #[derive(Serialize, Deserialize)]
 pub struct UploadResponse {
     pub file_id: String,
@@ -156,8 +186,7 @@ pub struct UploadResponse {
 
 impl UploadResponse {
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        postcard::from_bytes(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize UploadResponse: {}", e))
+        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
     }
 }
 
@@ -169,12 +198,10 @@ pub struct DownloadHeader {
 
 impl DownloadHeader {
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        postcard::to_allocvec(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize DownloadHeader: {}", e))
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        postcard::from_bytes(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize DownloadHeader: {}", e))
+        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -197,12 +224,10 @@ pub struct DownloadResponse {
 
 impl DownloadResponse {
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        postcard::to_allocvec(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize DownloadResponse: {}", e))
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        postcard::from_bytes(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize DownloadResponse: {}", e))
+        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
     }
 }
 
@@ -214,12 +239,10 @@ pub struct ErrorHeader {
 
 impl ErrorHeader {
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        postcard::to_allocvec(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize ErrorHandler: {}", e))
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        postcard::from_bytes(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize ErrorHandler: {}", e))
+        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
     }
 }
 
@@ -231,12 +254,10 @@ pub struct WarnHeader {
 
 impl WarnHeader {
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        postcard::to_allocvec(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize WarnHeader: {}", e))
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        postcard::from_bytes(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize WarnHeader: {}", e))
+        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
     }
 }
 
@@ -252,11 +273,9 @@ pub struct StatusHeader {
 
 impl StatusHeader {
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        postcard::to_allocvec(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize StatusHeader: {}", e))
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        postcard::from_bytes(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize StatusHeader: {}", e))
+        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
     }
 }

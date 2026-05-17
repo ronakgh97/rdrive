@@ -1,4 +1,4 @@
-Tweaking with Network Protocol & Security while building Amazon s3 ***COMMUNIST VERSION***
+Tweaking with Network Protocol & Security while building **State-of-the-art** Amazon s3 ***COMMUNIST VERSION***
 
 `Goal: Protect servers from 'bad' users. Protect users from 'bad' servers`
 
@@ -17,6 +17,8 @@ Tweaking with Network Protocol & Security while building Amazon s3 ***COMMUNIST 
 - vulnerable to path injection `(maybe have some edge cases)`
 - first connection not secure `(user must trust the server first)`
 - no recovery keys
+- compute waste for unauthorized client access, init handshake/exchange takes some time, but maybe minor issue, idk
+- non-portable protocol, cross-lang support is a bit of chaos now
 
 **How to set up?**
 
@@ -123,5 +125,8 @@ TODO
 - Recoverable keys somehow?, better recover & key backups
 
 https://www.backblaze.com/docs/cloud-storage-about-backblaze-b2-cloud-storage
+https://www.rfc-editor.org/rfc/rfc8032
+https://www.openssh.org/?utm_source=chatgpt.com
+
 
 HIRE ME ***BLACKBLAZE*** 🥺😭🤧 🌹

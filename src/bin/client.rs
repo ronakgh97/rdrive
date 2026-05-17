@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
+use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use r_drive::args::{ClientArgs, ClientCommands};
 use r_drive::crypto::generate_ed25519_keypair;
 use r_drive::protocol_v1::{
@@ -45,6 +45,9 @@ async fn main() -> Result<()> {
                 let signing_key = SigningKey::from_pkcs8_pem(&old_pri_pem)
                     .context("Bad private key, cannot rotate")?;
 
+                let old_public_key = VerifyingKey::from_public_key_pem(&old_pub_pem)
+                    .context("Bad public key, cannot rotate")?;
+
                 let (new_pri, new_pub) = generate_ed25519_keypair()?;
                 let new_pri_pem = new_pri.to_pkcs8_pem(LineEnding::LF)?;
                 let new_pub_pem = new_pub.to_public_key_pem(LineEnding::LF)?;
@@ -55,14 +58,7 @@ async fn main() -> Result<()> {
                 );
 
                 // Try sync with server BEFORE writing to disk!!!
-                auth_client(
-                    signing_key,
-                    &new_pub_pem,
-                    Some(&old_pub_pem),
-                    &address,
-                    port,
-                )
-                .await?;
+                auth_client(signing_key, new_pub, Some(old_public_key), &address, port).await?;
 
                 println!("Key rotated/synced successfully");
                 tokio::fs::create_dir_all(&user_path).await?;
@@ -72,19 +68,20 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let (signing_key, pub_pem) = match existing_keys {
+            let (signing_key, verifying_key) = match existing_keys {
                 Some((pri_pem, pub_pem)) => {
                     println!("Found existing keypair");
 
                     let signing_key = SigningKey::from_pkcs8_pem(&pri_pem)
                         .context("Bad private key, cannot authenticate")?;
+                    let verifying_key = VerifyingKey::from_public_key_pem(&pub_pem)
+                        .context("Bad public key, cannot authenticate")?;
 
-                    (signing_key, pub_pem)
+                    (signing_key, verifying_key)
                 }
 
                 None => {
                     let (prikey, pubkey) = generate_ed25519_keypair()?;
-
                     let pri_pem = prikey.to_pkcs8_pem(LineEnding::LF)?.to_string();
                     let pub_pem = pubkey.to_public_key_pem(LineEnding::LF)?;
 
@@ -94,17 +91,17 @@ async fn main() -> Result<()> {
 
                     println!("Generated ed25519 keypair.");
 
-                    (prikey, pub_pem)
+                    (prikey, pubkey)
                 }
             };
 
             println!(
-                "Public key (HEX):\n{}",
-                hex::encode(pub_pem.as_bytes()).green()
+                "Public key (PEM HEX):\n{}",
+                hex::encode(verifying_key.to_public_key_pem(LineEnding::LF)?.as_bytes()).green()
             );
 
             if auth {
-                auth_client(signing_key, &pub_pem, None, &address, port).await?;
+                auth_client(signing_key, verifying_key, None, &address, port).await?;
             } else {
                 println!(
                     "Make sure to whitelist your HEX public key on the server, If not already auth"
