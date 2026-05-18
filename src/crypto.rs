@@ -1,49 +1,76 @@
 use aes::Aes256;
 use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
+use anyhow::Result;
 use rand::Rng;
 use sha2::Digest;
 use sha2::Sha256;
+
+const NONCE_LEN: usize = 12;
+const TAG_LEN: usize = 32;
 
 /// Encrypt `data` with a 32-byte `key` using AES-256 CTR keystream XOR.
 /// A random 12-byte nonce is generated and prepended to the output:
 /// \[ nonce: 12 bytes ]\[ ciphertext: N bytes ]
 ///
 #[inline]
-pub fn encrypt_data(data: &[u8], key: &[u8]) -> Vec<u8> {
-    assert!(key.len() >= 32, "Key must be at least 32 bytes");
-
-    // Generate a fresh random nonce for every encryption
-    let mut nonce = [0u8; 12];
+pub fn encrypt_data(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    // generate random 12-byte nonce
+    let mut nonce = [0u8; NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce);
+    let ciphertext = aes256_ctr_xor(key, &nonce, data)?;
 
-    let key_arr: &[u8; 32] = key[..32].try_into().unwrap();
-    let ciphertext = aes256_ctr_xor(key_arr, &nonce, data);
+    let mut tag = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    tag.extend_from_slice(&nonce);
+    tag.extend(&ciphertext);
 
-    // Output: nonce || ciphertext
-    let mut out = Vec::with_capacity(12 + ciphertext.len());
-    out.extend_from_slice(&nonce);
-    out.extend(ciphertext);
-    out
+    // TODO; using sha2 for now
+    let tag_hash = Sha256::digest(&tag);
+
+    // output; nonce || ciphertext || tag_hash
+    let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len() + TAG_LEN);
+    out.extend_from_slice(&nonce); // 12
+    out.extend(&ciphertext); // ?
+    out.extend_from_slice(&tag_hash); // 32
+    Ok(out)
 }
 
 /// Decrypt `data` that was encrypted with [`encrypt_data`],
 /// expects the first 12 bytes to be the nonce.
 #[inline]
-pub fn decrypt_data(data: &[u8], key: &[u8]) -> Vec<u8> {
-    assert!(key.len() >= 32, "Key must be at least 32 bytes");
-    assert!(data.len() >= 12, "Ciphertext too short to contain nonce");
+pub fn decrypt_data(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    if data.len() < TAG_LEN + NONCE_LEN {
+        return Err(anyhow::anyhow!(
+            "Ciphertext too short, must be at least {} bytes",
+            TAG_LEN + NONCE_LEN
+        ));
+    }
+    let nonce_end = NONCE_LEN;
+    let tag_start = data.len() - TAG_LEN;
 
-    let (nonce_bytes, ciphertext) = data.split_at(12);
-    let nonce: &[u8; 12] = nonce_bytes.try_into().unwrap();
-    let key: &[u8; 32] = key[..32].try_into().unwrap();
+    let nonce: &[u8; NONCE_LEN] = data[..nonce_end].try_into()?;
+    let ciphertext = &data[nonce_end..tag_start];
+    let tag_hash = &data[tag_start..];
+
+    let expected_tag_hash = {
+        let mut tag = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+        tag.extend_from_slice(nonce);
+        tag.extend(ciphertext);
+        Sha256::digest(&tag)
+    };
+
+    if tag_hash != expected_tag_hash.as_slice() {
+        return Err(anyhow::anyhow!(
+            "Tag hash mismatch, data may be corrupted or tampered with"
+        ));
+    }
 
     aes256_ctr_xor(key, nonce, ciphertext)
 }
 
 /// XOR `data` with an AES-256 CTR keystream derived from `key` and `nonce`.
 #[inline(always)]
-fn aes256_ctr_xor(key: &[u8; 32], nonce: &[u8; 12], data: &[u8]) -> Vec<u8> {
-    let cipher = Aes256::new_from_slice(key).expect("Key must be 32 bytes");
+fn aes256_ctr_xor(key: &[u8; 32], nonce: &[u8; 12], data: &[u8]) -> Result<Vec<u8>> {
+    let cipher = Aes256::new_from_slice(key)?;
     let mut output = Vec::with_capacity(data.len());
     let mut counter: u32 = 0;
 
@@ -62,7 +89,7 @@ fn aes256_ctr_xor(key: &[u8; 32], nonce: &[u8; 12], data: &[u8]) -> Vec<u8> {
         counter = counter.wrapping_add(1);
     }
 
-    output
+    Ok(output)
 }
 
 /// Hashes a slice of bytes and returns the hex string
@@ -85,8 +112,8 @@ pub fn generate_b32key() -> String {
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 
 /// Generates and returns a new Ed25519 keypair as hex strings (private_key, public_key)
-#[inline(always)]
-pub fn generate_ed25519_keypair() -> anyhow::Result<(SigningKey, VerifyingKey)> {
+#[inline]
+pub fn generate_ed25519_keypair() -> Result<(SigningKey, VerifyingKey)> {
     let mut rng = rand::rng();
 
     let private_key: SigningKey = SigningKey::generate(&mut rng);
@@ -104,30 +131,33 @@ pub fn generate_ed25519_keypair() -> anyhow::Result<(SigningKey, VerifyingKey)> 
 
 use x25519_dalek::{EphemeralSecret, PublicKey};
 /// Generates and returns a new X25519 keypair (private_key, public_key)
-pub fn generate_x25519_keypair() -> anyhow::Result<(EphemeralSecret, PublicKey)> {
+#[inline(always)]
+pub fn generate_x25519_keypair() -> Result<(EphemeralSecret, PublicKey)> {
     let private_key = EphemeralSecret::random_from_rng(&mut rand::rng());
     let public_key = PublicKey::from(&private_key);
     Ok((private_key, public_key))
 }
 
 #[test]
-fn crypto_test() {
+fn crypto_test() -> Result<()> {
     let mut key = [0u8; 32];
     rand::rng().fill_bytes(&mut key);
     let mut data = vec![0u8; 64 * 1024 * 1024];
     rand::rng().fill_bytes(&mut data);
 
-    let encrypted = encrypt_data(&data, &key);
-    assert_eq!(encrypted.len(), data.len() + 12);
+    let encrypted = encrypt_data(&data, &key)?;
+    assert_eq!(encrypted.len(), data.len() + NONCE_LEN + TAG_LEN);
 
-    let decrypted = decrypt_data(&encrypted, &key);
+    let decrypted = decrypt_data(&encrypted, &key)?;
     assert_eq!(decrypted, data);
 
     let data: &[u8] = b"";
 
-    let encrypted = encrypt_data(data, &key);
-    assert_eq!(encrypted.len(), 12);
+    let encrypted = encrypt_data(data, &key)?;
+    assert_eq!(encrypted.len(), NONCE_LEN + TAG_LEN);
 
-    let decrypted = decrypt_data(&encrypted, &key);
+    let decrypted = decrypt_data(&encrypted, &key)?;
     assert!(decrypted.is_empty());
+
+    Ok(())
 }
