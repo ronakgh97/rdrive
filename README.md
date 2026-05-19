@@ -7,14 +7,15 @@ Tweaking with Network Protocol & Security while building **State-of-the-art** Am
 - file-system native database
 - super secure & decentralized e2e `(uses ed22519 key for identify & x25519 for encryption)`
 - layering, delta transfer push/pull
-- built-in TLS'ish, server secure even on raw ip port
+- built-in custom TLS'ish, server secure even on raw ip port
+- low memory usage, heavy in-place alloc thanks to memory pool
 - backups, versioning, secure key rotation
 - zero-trust architecture `(ssh like handshake)`
 - fearless concurrency `(very little locks freeze)`
 
 **Limitations**
 
-- vulnerable to path injection `(maybe have some edge cases)`
+- vulnerable to path injection `(maybe have some edge cases)` [SOLVED, Just use hash256]
 - first connection not secure `(user must trust the server first)`
 - no recovery keys
 - compute waste for unauthorized client access, init handshake/exchange takes some time, but maybe minor issue, idk
@@ -123,10 +124,11 @@ TODO
 - Proper secure protocol design, fuck TLS, SSL shit
 - Portable cross-lang protocol
 - Recoverable keys somehow?, better recover & key backups
+- Global Memory Pool per connection
 
 https://www.backblaze.com/docs/cloud-storage-about-backblaze-b2-cloud-storage
 https://www.rfc-editor.org/rfc/rfc8032
-https://www.openssh.org/?utm_source=chatgpt.com
-
+https://www.rfc-editor.org/rfc/rfc5869
+https://www.openssh.org/
 
 HIRE ME ***BLACKBLAZE*** 🥺😭🤧 🌹

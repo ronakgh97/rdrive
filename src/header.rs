@@ -9,8 +9,9 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize)]
 pub struct ClientHello {
     pub x22519_key: [u8; 32],
-    #[serde(with = "BigArray")]
-    pub signature: [u8; 64],
+    // #[serde(with = "BigArray")]
+    // pub signature: [u8; 64],
+    pub nonce: [u8; 32], // must be 32 or hash256, I don't care you
 }
 
 impl ClientHello {
@@ -28,6 +29,7 @@ pub struct ServerHello {
     pub x22519_key: [u8; 32],
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
+    pub nonce: [u8; 32], // must be 32 or hash256, I don't care you
 }
 
 impl ServerHello {
@@ -48,6 +50,26 @@ pub enum Command {
 }
 
 impl Command {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
+    }
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        from_bytes(bytes).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
+    }
+}
+
+/// Echo Test for debugging, not used in production, just a simple header to test the connection and latency
+#[derive(Serialize, Deserialize)]
+pub struct EchoDebugHeader {
+    /// secret from x25519 exchange
+    session_key: [u8; 32],
+    /// sha256 of the payload
+    payload_hash: [u8; 32],
+    /// timestamp before returning
+    timestamp_ms: u64,
+}
+
+impl EchoDebugHeader {
     pub fn serialize(&self) -> Result<Vec<u8>> {
         to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
@@ -115,7 +137,7 @@ impl RotateKeyHeader {
 }
 
 #[inline(always)]
-pub fn validate_signature(
+fn validate_signature(
     public_bytes: &[u8; 32],
     signature_bytes: &[u8; 64],
     nonce: &[u8],
@@ -126,11 +148,14 @@ pub fn validate_signature(
         .map_err(|e| anyhow::anyhow!("Failed to construct public key from bytes: {}", e))?;
 
     public_key
-        .verify(&Sha256::digest(nonce), &signature)
+        .verify(nonce, &signature)
         .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
 
     Ok(())
 }
+
+// TODO; listen...for header..
+//  we will use some derive from secret key as nonce challenge, this prevents roundtrip
 
 // TODO; header needs a massive refactor, I'm being serious
 #[derive(Serialize, Deserialize)]
@@ -140,6 +165,9 @@ pub struct UploadHeader {
     pub file_size: u64,
     pub file_hash: String,
     pub file_key: String,
+    pub ed25519_key_bytes: [u8; 32],
+    #[serde(with = "BigArray")]
+    pub signature: [u8; 64],
 }
 
 impl UploadHeader {
@@ -152,6 +180,7 @@ impl UploadHeader {
     }
 
     pub fn validate(&self) -> Result<()> {
+        // TODO: we dont need check or sanitized, just use hash
         if self.file_id.is_empty()
             || !(32..=256).contains(&self.file_id.len())
             || self.file_id.chars().any(|c| c.is_control())

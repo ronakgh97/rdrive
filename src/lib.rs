@@ -9,6 +9,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::io::Read;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -237,10 +238,10 @@ impl Catalog {
     }
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct AuthServerMap {
-    /// Map -> (Host/IP, pubkey_hex)
-    pub server_map: HashMap<String, String>,
+    /// Map -> (Host/IP, pubkey_pem)
+    pub server_map: HashMap<SocketAddr, String>,
 }
 
 impl AuthServerMap {

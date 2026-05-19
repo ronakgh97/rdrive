@@ -1,18 +1,25 @@
+// TODO: HOLY FUCKING SHIT, THIS IS A MESS, LOGIC ARE SOUND, BUT GOD THIS IS UNREADIABLE NOT TASTEFULL
+
+use crate::crypto::{decrypt_data_in_place, encrypt_data_in_place, generate_x25519_keypair};
 use crate::header::{
-    Command, DownloadHeader, DownloadResponse, ErrorHeader, NewKeyHeader, RotateKeyHeader,
-    StatusHeader, UploadHeader, UploadResponse, WarnHeader,
+    ClientHello, Command, DownloadHeader, DownloadResponse, ErrorHeader, NewKeyHeader,
+    RotateKeyHeader, ServerHello, StatusHeader, UploadHeader, UploadResponse, WarnHeader,
 };
 use crate::{
-    ACTIVE_CONNECTIONS, ENABLE_CLIENT_WHITELIST, MAX_CONNECTIONS, MetadataFile,
-    NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_TRACKER,
-    START_TIME, Tracker, WRITE_TIMEOUT, debug, error, file_hasher_async, get_authorized_client_dir,
-    get_storage_dir, hold_file_lock, info, release_file_lock, trace, try_get_uptime_hrs, warn,
+    ACTIVE_CONNECTIONS, AuthServerMap, ENABLE_CLIENT_WHITELIST, MAX_CONNECTIONS, MetadataFile,
+    NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_PRI_KEY_PEM,
+    SERVER_PUB_KEY_PEM, SERVER_TRACKER, START_TIME, Tracker, WRITE_TIMEOUT, debug, error,
+    file_hasher_async, get_authorized_client_dir, get_authorized_server_map_path, get_storage_dir,
+    hold_file_lock, info, release_file_lock, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+use ed25519_dalek::pkcs8::{DecodePublicKey, EncodePublicKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hex::encode;
 use indicatif::{ProgressBar, ProgressStyle};
+use rand::Rng;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::cmp::min;
@@ -70,18 +77,72 @@ pub async fn start_tcp_server(port: u16, storage_path: Arc<PathBuf>) -> Result<(
 #[inline]
 async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result<()> {
     stream.set_nodelay(true).ok();
-    let (mut reader, mut writer) = stream.split();
+    let (reader, writer) = stream.split();
+    let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
+    let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
 
     //------
 
     // starts init common handshake, goal is secure tunnel, where server is auth by client.
     // client connects, we immediately do x22519 exchange, and question authenticity later
-    // flow; client [nonce + x25519] to server ->
-    // server sign[ nonce_c + ed25519 + x25519] (ed25519 + x25519) to client {sign all that will be immune to MITM}->
+    // flow; client [nonce_c + x25519_c] to server ->
+    // server sign[nonce_c + nonce_s + x25519_c + x25519_s] + (ed25519_s + x25519_s + nonce_s) to client {sign all, that will be immune to MITM}->
     // client either drop tcp on invalid signature/disapprove or move on with whatever handler
     // both compute shared secret, encrypted channel
 
-    // from here client must have trust server
+    let client_hello = {
+        let mut client_hello_data = vec![];
+        read_data_in_place_raw(&mut reader, &mut client_hello_data).await?;
+        ClientHello::deserialize(&client_hello_data)?
+    };
+
+    let (x25519_pri, x25519_pub) = generate_x25519_keypair()?;
+
+    let server_hello_data = {
+        use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
+        let mut nonce = [0u8; 32];
+        rand::rng().fill_bytes(&mut nonce);
+
+        let ed22519_pub = VerifyingKey::from_public_key_pem(&SERVER_PUB_KEY_PEM).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to construct server Ed25519 public key from PEM: {}",
+                e
+            )
+        })?;
+
+        let ed22519_pri = SigningKey::from_pkcs8_pem(&SERVER_PRI_KEY_PEM).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to construct server Ed25519 private key from PEM: {}",
+                e
+            )
+        })?;
+
+        let mut data_signed = [0u8; 128];
+        data_signed[0..32].copy_from_slice(&client_hello.nonce);
+        data_signed[32..64].copy_from_slice(&nonce);
+        data_signed[64..96].copy_from_slice(&client_hello.x22519_key);
+        data_signed[96..128].copy_from_slice(&x25519_pub.to_bytes());
+
+        use ed25519_dalek::ed25519::signature::AsyncSigner;
+        let signature = ed22519_pri.sign_async(&data_signed).await?;
+
+        let server_hello = ServerHello {
+            ed25519_key: ed22519_pub.to_bytes(),
+            x22519_key: x25519_pub.to_bytes(),
+            signature: signature.to_bytes(),
+            nonce,
+        };
+        server_hello.serialize()?
+    };
+
+    // send Hello to client
+    timeout(
+        WRITE_TIMEOUT,
+        write_frame_raw(&mut writer, &server_hello_data),
+    )
+    .await??;
+
+    // from here client must have trusted server or rejected
     // now we check client authenticity, BUT actually, I guess
     // we don't need to, because client need to pass AUTH header and create their user-space
     // TODO: I might be wrong about the design, or for now, let trust client,
@@ -89,10 +150,21 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
     //  and do not create user-space, argh... transport layer logic colliding with application logic
     //  anyway, this is becoming ssh handshake
 
+    let session_key: [u8; 32] = {
+        use x25519_dalek::PublicKey;
+        let mut key = [0u8; 64]; // first 32 are zero
+        key[32..64].copy_from_slice(
+            &x25519_pri
+                .diffie_hellman(&PublicKey::from(client_hello.x22519_key))
+                .to_bytes(),
+        );
+        Sha256::digest(key).into() // TODO; I HATEEEEE ".into()" SO MUCHHHHHHH
+    };
+
     //------
 
     let start_time = Instant::now();
-    let command = match read_headers(&mut reader).await {
+    let command = match read_headers(&mut reader, &session_key).await {
         Ok(cmd) => cmd,
         Err(e) => {
             // Handle timeout or early EOF
@@ -103,6 +175,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
                         code: 408,
                         message: "Request timed out".to_string(),
                     },
+                    &session_key,
                 )
                 .await;
                 return Ok(());
@@ -119,17 +192,25 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
     match command {
         Command::Auth(flags) => {
             debug!("Received INIT request");
-            handle_auth_keys(&mut reader, &mut writer, flags).await?;
+            handle_auth_keys(&mut reader, &mut writer, flags, &session_key).await?;
             writer.flush().await?;
             Ok(())
         }
+        // TODO: ok maybe file headers need nonce challenge MAYBE!!!
         Command::Upload(header) => {
             debug!("Received UPLOAD request");
 
             match header.validate() {
                 Ok(_) => {
-                    handle_upload(&mut reader, &mut writer, header, start_time, storage_path)
-                        .await?;
+                    handle_upload(
+                        &mut reader,
+                        &mut writer,
+                        header,
+                        start_time,
+                        storage_path,
+                        &session_key,
+                    )
+                    .await?;
                 }
                 Err(e) => {
                     send_failed(
@@ -138,6 +219,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
                             code: 400,
                             message: format!("Invalid upload header: {}", e),
                         },
+                        &session_key,
                     )
                     .await?;
                 }
@@ -151,7 +233,8 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
 
             match header.validate() {
                 Ok(_) => {
-                    handle_download(&mut reader, &mut writer, header, storage_path).await?;
+                    handle_download(&mut reader, &mut writer, header, storage_path, &session_key)
+                        .await?;
                 }
                 Err(e) => {
                     send_failed(
@@ -160,6 +243,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
                             code: 400,
                             message: format!("Invalid download header: {}", e),
                         },
+                        &session_key,
                     )
                     .await?;
                 }
@@ -178,7 +262,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
 
 /// Read 4 bytes for frame length with timeout, return error on timeout or read failure
 #[inline(always)]
-pub async fn read_frame_length<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u32> {
+async fn read_frame_length<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u32> {
     const MAX_FRAME_LENGTH: u32 = 1024 * 1024 * 12;
     let mut len_buf = [0u8; 4];
     let Ok(result) = timeout(READ_TIMEOUT, reader.read_exact(&mut len_buf)).await else {
@@ -196,20 +280,73 @@ pub async fn read_frame_length<R: AsyncReadExt + Unpin>(reader: &mut R) -> Resul
     Ok(len)
 }
 
-/// Read headers with timeout, return packed command, handle timeout and early EOF
+/// Read encrypted headers, decrypt and deserialize into Command, return error on timeout, read failure, decryption failure, or deserialization failure
 #[inline(always)]
-async fn read_headers<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Command> {
+async fn read_headers<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    session_key: &[u8; 32],
+) -> Result<Command> {
     let len = read_frame_length(reader).await? as usize;
     let mut header_bytes = vec![0u8; len];
     reader.read_exact(&mut header_bytes).await?;
 
+    decrypt_data_in_place(&mut header_bytes, session_key)?;
     let command = Command::deserialize(&header_bytes)?;
     Ok(command)
 }
 
-/// Write a frame with 4-byte length prefix, return error on write failure
+/// Read encrypted data in-place with timeout, return error on timeout, read failure, or decryption failure
+#[allow(unused)]
 #[inline(always)]
-pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> Result<()> {
+async fn read_data_in_place<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    session_key: [u8; 32],
+    mut data: Vec<u8>,
+) -> Result<()> {
+    let len = read_frame_length(reader).await? as usize;
+    // data.clear();
+    data.resize(len, 0); // zero-out the required space
+    reader.read_exact(&mut data).await?;
+
+    decrypt_data_in_place(&mut data, &session_key)
+}
+
+/// Read raw data in-place with timeout, return error on timeout or read failure, no decryption
+#[inline(always)]
+async fn read_data_in_place_raw<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    data: &mut Vec<u8>,
+) -> Result<()> {
+    let len = read_frame_length(reader).await? as usize;
+    // data.clear();
+    data.resize(len, 0); // zero-out the required space
+    reader.read_exact(data).await?;
+    Ok(())
+}
+
+/// Write encrypted data with 4-byte length prefix, return error on write failure or encryption failure
+#[inline(always)]
+async fn write_frame<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    data: &[u8],
+    session_key: &[u8; 32],
+) -> Result<()> {
+    let buf = data.to_vec(); // compute correct len
+    let len = buf.len();
+    if len > u32::MAX as usize {
+        return Err(anyhow::anyhow!("Too large content: {} bytes", len));
+    }
+    let len = (len as u32).to_be_bytes();
+
+    encrypt_data_in_place(&mut data.to_vec(), session_key)?;
+    writer.write_all(&len).await?;
+    writer.write_all(&buf).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write a raw frame with 4-byte length prefix, return error on write failure, no encryption
+async fn write_frame_raw<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> Result<()> {
     let len = data.len();
     if len > u32::MAX as usize {
         return Err(anyhow::anyhow!("Too large content: {} bytes", len));
@@ -226,24 +363,29 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) 
 async fn send_success<W: AsyncWriteExt + Unpin, T: Serialize>(
     writer: &mut W,
     response: &T,
+    session_key: &[u8; 32],
 ) -> Result<()> {
     let mut rsp = Vec::with_capacity(1 + 96);
     rsp.push(1u8); // 1 = success
     postcard::to_io(response, &mut rsp)
         .map_err(|e| anyhow::anyhow!("Failed to serialize success response: {}", e))?;
-    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??;
+    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp, session_key)).await??;
     writer.shutdown().await?; // Close connection after response
     Ok(())
 }
 
 /// Send a generic warning response with code and message, then close the connection
 #[inline]
-async fn send_warn<W: AsyncWriteExt + Unpin>(writer: &mut W, response: WarnHeader) -> Result<()> {
+async fn send_warn<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    response: WarnHeader,
+    session_key: &[u8; 32],
+) -> Result<()> {
     let payload_bytes = response.serialize()?;
     let mut rsp = Vec::with_capacity(1 + payload_bytes.len());
     rsp.push(2u8); // 2 = warning
     rsp.extend(payload_bytes);
-    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??;
+    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp, session_key)).await??;
     writer.shutdown().await?;
     Ok(())
 }
@@ -253,12 +395,13 @@ async fn send_warn<W: AsyncWriteExt + Unpin>(writer: &mut W, response: WarnHeade
 async fn send_failed<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     response: ErrorHeader,
+    session_key: &[u8; 32],
 ) -> Result<()> {
     let payload_bytes = response.serialize()?;
     let mut rsp = Vec::with_capacity(1 + payload_bytes.len());
     rsp.push(3u8); // 3 = error
     rsp.extend(payload_bytes);
-    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??;
+    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp, session_key)).await??;
     writer.shutdown().await?;
     Ok(())
 }
@@ -298,22 +441,17 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
     }
     .serialize()?;
 
-    timeout(WRITE_TIMEOUT, write_frame(writer, &status)).await??;
+    timeout(WRITE_TIMEOUT, write_frame_raw(writer, &status)).await??;
     writer.shutdown().await?;
     Ok(())
 }
-
 /// Handle key registration and rotation: send nonce challenge, verify signature, create/rename user directory, send ACK or error response
 async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
     writer: &mut W,
     flag: u8,
+    session_key: &[u8; 32],
 ) -> Result<()> {
-    use ed25519_dalek::VerifyingKey;
-    use ed25519_dalek::pkcs8::EncodePublicKey;
-    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-    use rand::Rng;
-
     let mut nonce = vec![0u8; 4096];
     rand::rng().fill_bytes(&mut nonce);
 
@@ -321,7 +459,12 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     //  will this need x25519 encryption? (app level or network level?),
     //  I'm trying to come up with shared header flow, to reduce brain damage
     // send nonce challenge to client for signature verification, FIRST
-    timeout(WRITE_TIMEOUT, write_frame(writer, &nonce)).await??;
+    // hashing for good sake, 32 bytes cute
+    timeout(
+        WRITE_TIMEOUT,
+        write_frame(writer, &Sha256::digest(&nonce), session_key),
+    )
+    .await??;
 
     // read key header and do the thing
     let len = read_frame_length(reader).await? as usize;
@@ -365,6 +508,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                 message: "Client not authorized, please contact the admin, provider or ssh into the server"
                                     .to_string(),
                             },
+                            session_key,
                         ).await?;
 
                         return Ok(());
@@ -381,6 +525,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                 code: 500,
                                 message: "Auth key path exists but is not a directory, skipping user storage dir creation".to_string(),
                             },
+                            session_key,
                         ).await?;
 
                         return Ok(());
@@ -402,6 +547,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                             message: "Client Auth & Storage directory already exists, not required"
                                 .to_string(),
                         },
+                        session_key,
                     )
                     .await?;
                     return Ok(());
@@ -424,12 +570,13 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                 message: "Failed to create auth key or user storage directory, try again later"
                                     .to_string(),
                             },
+                            session_key,
                         ).await?;
                         return Ok(());
                     }
                     _ => {}
                 }
-                timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??; // ACK
+                timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8], session_key)).await??; // ACK
             }
             Err(e) => {
                 send_failed(
@@ -438,6 +585,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                         code: 401,
                         message: format!("Invalid signature: {}", e),
                     },
+                    session_key,
                 )
                 .await?;
                 return Ok(());
@@ -503,6 +651,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                 code: 500,
                                 message: "Failed to rotate keys, try again later".to_string(),
                             },
+                            session_key,
                         )
                         .await?;
                         return Ok(());
@@ -510,7 +659,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                     _ => {}
                 }
 
-                timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??; // ACK
+                timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8], session_key)).await??; // ACK
             }
             Err(e) => {
                 send_failed(
@@ -519,6 +668,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                         code: 401,
                         message: format!("Invalid signature: {}", e),
                     },
+                    session_key,
                 )
                 .await?;
                 return Ok(());
@@ -531,6 +681,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 code: 400,
                 message: "Invalid flag value".to_string(),
             },
+            session_key,
         )
         .await?;
         return Ok(());
@@ -546,6 +697,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     headers: UploadHeader,
     time_start: Instant,
     storage_path: &Path,
+    session_key: &[u8; 32],
 ) -> Result<()> {
     let file_id = headers.file_id.clone();
     let file_lock = hold_file_lock(&file_id);
@@ -559,6 +711,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                     code: 409,
                     message: "File is currently locked by another operation".to_string(),
                 },
+                session_key,
             )
             .await?;
             return Ok(());
@@ -581,7 +734,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     );
 
     // Send ACK before streaming starts
-    timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8])).await??;
+    timeout(WRITE_TIMEOUT, write_frame(writer, &[0x1u8], session_key)).await??;
 
     let file = File::create(&file_path).await?;
     let mut buf_file = BufWriter::with_capacity(READ_CHUNK_SIZE * 2, file);
@@ -617,6 +770,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 code: 406,
                 message: "File hash mismatch".to_string(),
             },
+            session_key,
         )
         .await?;
         return Ok(());
@@ -642,6 +796,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
             file_id: headers.file_id,
             time_took,
         },
+        session_key,
     )
     .await?;
 
@@ -659,6 +814,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     headers: DownloadHeader,
     storage_path: &Path,
+    session_key: &[u8; 32],
 ) -> Result<()> {
     let file_id = headers.file_id.clone();
     let file_lock = hold_file_lock(&file_id);
@@ -672,6 +828,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                     code: 409,
                     message: "File is currently being uploaded or modified".to_string(),
                 },
+                session_key,
             )
             .await?;
             return Ok(());
@@ -688,6 +845,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 code: 404,
                 message: "File not found".to_string(),
             },
+            session_key,
         )
         .await?;
         return Ok(());
@@ -705,6 +863,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 code: 404,
                 message: "Metadata File not found".to_string(),
             },
+            session_key,
         )
         .await?;
         return Ok(());
@@ -723,6 +882,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                     code: 500,
                     message: "Failed to read metadata".to_string(),
                 },
+                session_key,
             )
             .await;
         }
@@ -750,7 +910,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let mut rsp = Vec::with_capacity(1 + header.len());
     rsp.push(1u8); // 1 = success;
     rsp.extend(header);
-    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp)).await??; // connection should be kept alive
+    timeout(WRITE_TIMEOUT, write_frame(writer, &rsp, session_key)).await??; // connection should be kept alive
 
     let file = File::open(&file_path).await?;
     let mut buf_file = BufReader::with_capacity(READ_CHUNK_SIZE * 2, file);
@@ -777,6 +937,128 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+/// Helper function to perform client handshake and return the computed shared secret session key and tcp stream for continue handler,
+/// or error if handshake fails at any step (network error, invalid server response, signature verification failure, or user rejection of untrusted server)
+async fn client_handshake_helper(host: &str, port: u16) -> Result<([u8; 32], TcpStream)> {
+    // connect first
+    let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    stream.set_nodelay(true).ok();
+
+    let server_ip = stream
+        .peer_addr()
+        .map_err(|e| anyhow::anyhow!("Failed to get server IP: {}", e))?;
+
+    let mut nonce = [0u8; 32];
+    rand::rng().fill_bytes(&mut nonce);
+    let (x25519_pri, x25519_pub) = generate_x25519_keypair()?;
+
+    let client_hello_data = ClientHello {
+        x22519_key: x25519_pub.to_bytes(),
+        nonce,
+    }
+    .serialize()?;
+
+    let (reader, writer) = stream.split();
+    let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
+    let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
+    write_frame_raw(&mut writer, &client_hello_data).await?; // send client hello
+
+    let mut server_hello_data = vec![];
+    read_data_in_place_raw(&mut reader, &mut server_hello_data).await?; // read server hello
+    let server_hello = ServerHello::deserialize(&server_hello_data)?;
+
+    // we check server_map, proceed with caller handler or reject
+    let mut authorized_server =
+        AuthServerMap::read_or_create(&get_authorized_server_map_path()?).await?;
+
+    let server_key = VerifyingKey::from_bytes(&server_hello.ed25519_key)
+        .context("Failed to parse server Ed25519 public key")?;
+    let server_key_pem = server_key
+        .to_public_key_pem(LineEnding::LF)
+        .context("Failed to encode server public key as PEM")?;
+
+    // determine trusted key
+    let trusted_key =
+        if let Some(existing_server_pem) = authorized_server.server_map.get(&server_ip) {
+            if existing_server_pem != &server_key_pem {
+                println!("{} {}", "WARNING: server key changed for".red(), server_ip);
+                println!("{}\n{}", "Before:".yellow(), existing_server_pem);
+                println!("{}\n{}", "After:".yellow(), server_key_pem);
+                println!("Trust new key? [y/N]");
+
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_line(&mut input)
+                    .context("Failed to read user input")?;
+
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    stream.shutdown().await?; // instant close, server gets graceful EOF
+                    drop(stream);
+                    anyhow::bail!("User rejected rotated server key");
+                }
+
+                // replace stored key
+                authorized_server
+                    .server_map
+                    .insert(server_ip, server_key_pem);
+
+                server_key
+            } else {
+                // use already trusted stored key
+                VerifyingKey::from_public_key_pem(existing_server_pem)
+                    .context("Stored PEM key is invalid")?
+            }
+        } else {
+            println!("Unknown server ip: {}", server_ip);
+            println!("Server key:\n{}", server_key_pem);
+            println!("Trust this server? [y/N]");
+
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("Failed to read user input")?;
+
+            if !input.trim().eq_ignore_ascii_case("y") {
+                stream.shutdown().await?; // instant close, server gets graceful EOF
+                drop(stream);
+                anyhow::bail!("User rejected unknown server");
+            }
+
+            authorized_server
+                .server_map
+                .insert(server_ip, server_key_pem);
+
+            server_key
+        };
+
+    // construct signed payload SAME AS SERVER
+    let mut data_signed = [0u8; 128];
+    data_signed[0..32].copy_from_slice(&nonce);
+    data_signed[32..64].copy_from_slice(&server_hello.nonce);
+    data_signed[64..96].copy_from_slice(&x25519_pub.to_bytes());
+    data_signed[96..128].copy_from_slice(&server_hello.x22519_key);
+
+    // verify signature
+    let signature = Signature::from_bytes(&server_hello.signature);
+
+    trusted_key
+        .verify(&data_signed, &signature)
+        .context("Server signature verification failed")?;
+
+    let session_key = {
+        use x25519_dalek::PublicKey;
+        let mut key = [0u8; 64];
+        key[32..64].copy_from_slice(
+            &x25519_pri
+                .diffie_hellman(&PublicKey::from(server_hello.x22519_key))
+                .to_bytes(),
+        );
+        Sha256::digest(key).into() // TODO; I HATEEEEE ".into()" SO MUCHHHHHHH
+    };
+
+    Ok((session_key, stream))
+}
+
 // TODO: Too many repetitive lazy code, very poor thinking, refactor later
 
 /// Client function to register a new public key or rotate existing keys: connect to server, perform nonce challenge, sign nonce, send key info, handle ACK or error response
@@ -789,28 +1071,31 @@ pub async fn auth_client(
 ) -> Result<()> {
     use ed25519_dalek::Signer;
 
-    let request = Command::Auth(if old_verifying_key.is_some() { 2 } else { 1 }).serialize()?;
-
-    let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
-    stream.set_nodelay(true).ok();
-
+    let (session_key, mut stream) = client_handshake_helper(host, port)
+        .await
+        .map_err(|e| anyhow::anyhow!("Handshake failed: {}", e))?;
     let (reader, writer) = stream.split();
     let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
     let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
-    let len = (request.len() as u32).to_be_bytes();
-    writer.write_all(&len).await?;
-    writer.write_all(&request).await?;
-    writer.flush().await.context("Failed to flush request")?;
+
+    // send auth header request
+    let mut auth_request =
+        Command::Auth(if old_verifying_key.is_some() { 2 } else { 1 }).serialize()?;
+    encrypt_data_in_place(&mut auth_request, &session_key)?;
+    write_frame(&mut writer, &auth_request, &session_key)
+        .await
+        .context("Failed to send auth header")?;
 
     let len_buf = read_frame_length(&mut reader).await? as usize;
     let mut nonce = vec![0u8; len_buf];
     reader
         .read_exact(&mut nonce)
         .await
-        .context("Failed to read response")?;
+        .context("Failed to read nonce challenge")?;
+    decrypt_data_in_place(&mut nonce, &session_key)?; // TODO: FUCKING BORROW CHECKER
 
     //TODO: we may add some bullshit to nonce, when full protocol is implemented
-    let signature = private_key.sign(&Sha256::digest(&nonce));
+    let signature = private_key.sign(&nonce);
     let header_bytes = match old_verifying_key {
         Some(old_verifying_key) => {
             let header = RotateKeyHeader {
@@ -829,10 +1114,9 @@ pub async fn auth_client(
         }
     };
 
-    let len = (header_bytes.len() as u32).to_be_bytes();
-    writer.write_all(&len).await?;
-    writer.write_all(&header_bytes).await?;
-    writer.flush().await?;
+    write_frame(&mut writer, &header_bytes, &session_key)
+        .await
+        .context("Failed to send key header")?;
 
     let len_buf = read_frame_length(&mut reader).await? as usize;
     let mut rsp = vec![0u8; len_buf];
@@ -840,6 +1124,7 @@ pub async fn auth_client(
         .read_exact(&mut rsp)
         .await
         .context("Failed to read response")?;
+    decrypt_data_in_place(&mut rsp, &session_key)?;
 
     // Reading flag for ACK or error
     if rsp[0] == 0x1u8 {
@@ -865,6 +1150,8 @@ pub async fn upload_client(
     file_id: &str,
     host: &str,
     port: u16,
+    signing_key: SigningKey,
+    verifying_key: VerifyingKey,
 ) -> Result<String> {
     let file_name = file_path
         .file_name()
@@ -881,10 +1168,13 @@ pub async fn upload_client(
         anyhow::bail!("File size must be greater than 1KB");
     }
 
-    let pg_bar = ProgressBar::new(file_size);
-    let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    // do handshake
+    let (session_key, mut stream) = client_handshake_helper(host, port)
+        .await
+        .map_err(|e| anyhow::anyhow!("Handshake failed: {}", e))?;
     stream.set_nodelay(true).ok();
 
+    let pg_bar = ProgressBar::new(file_size);
     println!(
         "Starting upload: {} ({} mb)",
         file_name,
@@ -896,28 +1186,35 @@ pub async fn upload_client(
         .context("Failed to compute file hash")?;
     println!("File hash: {}", file_hash.dimmed());
 
-    pg_bar.set_style(
-        ProgressStyle::default_bar()
-            .template("↪ [{bar:60.blue/cyan}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
-            .progress_chars("▨◻-"),
-    );
+    // TODO; will change this with nonce from server
+    let mut signed_data = vec![0u8; 64];
+    signed_data[..32].copy_from_slice(verifying_key.as_bytes());
+    signed_data[32..64].copy_from_slice(&Sha256::digest(session_key));
 
+    let signature = signing_key.sign(&signed_data);
     let request = Command::Upload(UploadHeader {
         file_id: file_id.to_string(),
         file_name,
         file_size,
         file_hash,
         file_key,
+        ed25519_key_bytes: verifying_key.to_bytes(),
+        signature: signature.to_bytes(),
     })
     .serialize()?;
+
+    pg_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("↪ [{bar:60.blue/cyan}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+            .progress_chars("▨◻-"),
+    );
 
     let (reader, writer) = stream.split();
     let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
     let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
-    let len = (request.len() as u32).to_be_bytes();
-    writer.write_all(&len).await?;
-    writer.write_all(&request).await?;
-    writer.flush().await.context("Failed to flush request")?;
+    write_frame(&mut writer, &request, &session_key) // send header request
+        .await
+        .context("Failed to send upload request")?;
 
     let len_buf = read_frame_length(&mut reader).await? as usize;
     let mut response = vec![0u8; len_buf];
@@ -925,6 +1222,7 @@ pub async fn upload_client(
         .read_exact(&mut response)
         .await
         .context("Failed to read response")?;
+    decrypt_data_in_place(&mut response, &session_key)?;
 
     // Reading flags early ACK
     if response[0] == 0x3u8 {
@@ -941,6 +1239,8 @@ pub async fn upload_client(
     let mut buf_file = BufReader::with_capacity(READ_CHUNK_SIZE * 2, file);
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
+    // TODO; encrypt locally with file-key
+
     loop {
         let n = buf_file
             .read(&mut buf)
@@ -949,8 +1249,14 @@ pub async fn upload_client(
         if n == 0 {
             break;
         }
+
+        // TODO; ok so THIS SHIT WILL CHANGE I CANT THINK RIGHT NOW!!!!
+        // encrypt file chunks
+        let mut encrypted_chunk = buf[..n].to_vec();
+        encrypt_data_in_place(&mut encrypted_chunk, &session_key)?; // todo: this needed a rewrite, im tired now
+
         writer
-            .write_all(&buf[..n])
+            .write_all(&encrypted_chunk)
             .await
             .context("Failed to send file data")?;
         pg_bar.inc(n as u64);
@@ -965,6 +1271,7 @@ pub async fn upload_client(
         .read_exact(&mut response)
         .await
         .context("Failed to read response")?;
+    decrypt_data_in_place(&mut response, &session_key)?;
 
     if response[0] == 0x3u8 {
         let err = ErrorHeader::deserialize(&response[1..])?;
@@ -976,7 +1283,7 @@ pub async fn upload_client(
 
     let rsp = UploadResponse::deserialize(&response[1..])?;
 
-    stream.shutdown().await.ok();
+    stream.shutdown().await?;
 
     println!("File ID: {} - Time took: {}", rsp.file_id, rsp.time_took);
 
@@ -1017,10 +1324,10 @@ pub async fn download_client(
         .context("Failed to read header")?;
 
     // Reading flags ACK
-    if header_bytes[0] == 0x2u8 {
+    if header_bytes[0] == 0x3u8 {
         let err = ErrorHeader::deserialize(&header_bytes[1..])?;
         anyhow::bail!("Download failed: {} - {}", err.code, err.message);
-    } else if header_bytes[0] == 0x3u8 {
+    } else if header_bytes[0] == 0x2u8 {
         let warn = WarnHeader::deserialize(&header_bytes[1..])?;
         println!("Download warning: {} - {}", warn.code, warn.message);
     }

@@ -250,8 +250,12 @@ async fn wait_check_tracker_metrics(
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn test_concurrency_v1() {
+    unsafe {
+        std::env::set_var("ENABLE_CLIENT_WHITELIST", "false");
+    }
+
     let _guard = share_lock().lock().await;
 
     cleanup_storage().await;
@@ -291,7 +295,9 @@ async fn test_concurrency_v1() {
     }
 
     while let Some(result) = tasks.join_next().await {
-        result.unwrap();
+        result
+            .map_err(|e| panic!("v1 client task failed: {}", e))
+            .unwrap();
     }
 
     let expected_bw = 2.0 * num_clients as f64 * TEST_FILE_SIZE as f64 / (1024.0 * 1024.0 * 1024.0);
