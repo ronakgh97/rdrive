@@ -4,11 +4,11 @@ Tweaking with Network Protocol & Security while building **State-of-the-art** Am
 
 **Features**
 
-- file-system native database
+- file-system native database `directories are just mere hash table`
 - super secure & decentralized e2e `(uses ed22519 key for identify & x25519 for encryption)`
 - layering, delta transfer push/pull
 - built-in custom TLS'ish, server secure even on raw ip port
-- low memory usage, heavy in-place alloc thanks to memory pool
+- low memory usage, heavy in-place alloc thanks to global memory pool per connection
 - backups, versioning, secure key rotation
 - zero-trust architecture `(ssh like handshake)`
 - fearless concurrency `(very little locks freeze)`
@@ -16,7 +16,7 @@ Tweaking with Network Protocol & Security while building **State-of-the-art** Am
 **Limitations**
 
 - vulnerable to path injection `(maybe have some edge cases)` [SOLVED, Just use hash256]
-- first connection not secure `(user must trust the server first)`
+- first connection not secure `(user must trust the server first)` [USER END ERROR, NOT CODE]
 - no recovery keys
 - compute waste for unauthorized client access, init handshake/exchange takes some time, but maybe minor issue, idk
 - non-portable protocol, cross-lang support is a bit of chaos now
@@ -28,12 +28,12 @@ auth/push/pull files
 
 ```shell
 docker pull ronakgh97/rdrive:latest (<128 mb)
-docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name rdrive ronakgh97/rdrive:latest
+docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name rdrive-node ronakgh97/rdrive:latest
 ```
 
 ```shell
-# ssh into server or go into docker container, 
-# and create ~/.rdrive/authorized_keys/<hex public key> dir for whitelisting 
+# ssh into server or go inside container, 
+# and create ~/.rdrive/authorized_keys/<hex public key> dir for whitelisting client 
 # or just ENABLE_CLIENT_WHITELIST false
 
 rdrive key # gen ed25519 keypair, does not overwrite until you do `-r` or `-a` for first init
@@ -121,14 +121,15 @@ TODO
 - DO some CAS magic for better storage efficiency and deduplication
 - Backup and restore features
 - Fix the MASTER_KEY/Encrption redundancy [Partially DONE]
-- Proper secure protocol design, fuck TLS, SSL shit
+- Proper secure protocol design, fuck TLS, SSL shit [Partially DONE]
 - Portable cross-lang protocol
 - Recoverable keys somehow?, better recover & key backups
-- Global Memory Pool per connection
+- Global Memory Pool per connection [Partially DONE]
+- Internal server error feedback or other similar
 
 https://www.backblaze.com/docs/cloud-storage-about-backblaze-b2-cloud-storage
 https://www.rfc-editor.org/rfc/rfc8032
 https://www.rfc-editor.org/rfc/rfc5869
 https://www.openssh.org/
 
-HIRE ME ***BLACKBLAZE*** 🥺😭🤧 🌹
+HIRE ME `BLACKBLAZE` 🥺😭🤧 🌹

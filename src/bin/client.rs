@@ -17,6 +17,7 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = ClientArgs::parse();
+    let mut alloc_mem = vec![0u8; 12 * 1024 * 1024];
 
     match args.command {
         // TODO: Somehow find a way to recover keys
@@ -53,12 +54,20 @@ async fn main() -> Result<()> {
                 let new_pub_pem = new_pub.to_public_key_pem(LineEnding::LF)?;
 
                 println!(
-                    "Preview Public key (HEX):\n{}",
+                    "Preview Public key (PEM HEX):\n{}",
                     hex::encode(new_pub_pem.as_bytes()).green()
                 );
 
                 // Try sync with server BEFORE writing to disk!!!
-                auth_client(signing_key, new_pub, Some(old_public_key), &address, port).await?;
+                auth_client(
+                    signing_key,
+                    new_pub,
+                    Some(old_public_key),
+                    &address,
+                    port,
+                    &mut alloc_mem,
+                )
+                .await?;
 
                 println!("Key rotated/synced successfully");
                 tokio::fs::create_dir_all(&user_path).await?;
@@ -101,8 +110,17 @@ async fn main() -> Result<()> {
             );
 
             if auth {
-                auth_client(signing_key, verifying_key, None, &address, port).await?;
+                auth_client(
+                    signing_key,
+                    verifying_key,
+                    None,
+                    &address,
+                    port,
+                    &mut alloc_mem,
+                )
+                .await?;
             } else {
+                // TODO: do a little user prompt here after showing key
                 println!(
                     "Make sure to whitelist your HEX public key on the server, If not already auth"
                 );
@@ -115,6 +133,22 @@ async fn main() -> Result<()> {
             protocol,
             file_key,
         }) => {
+            let user_path = get_user_key_dir()?;
+            let private_key_path = user_path.join("private_key.pem");
+            let public_key_path = user_path.join("public_key.pem");
+
+            if !private_key_path.exists() && public_key_path.exists() {
+                eprintln!("Public key exists but private key is missing, cannot push.");
+                std::process::exit(1);
+            }
+
+            let signing_key = SigningKey::from_pkcs8_pem(
+                &tokio::fs::read_to_string(&private_key_path)
+                    .await
+                    .context("Failed to read private key for push")?,
+            )
+            .context("Bad private key, cannot push")?;
+
             if !file.exists() {
                 eprintln!("File not found: {}", file.display());
                 std::process::exit(1);
@@ -182,7 +216,18 @@ async fn main() -> Result<()> {
             };
 
             match protocol.as_str() {
-                "v1" => upload_file_v1(file, file_key, &file_id, &address, port).await?,
+                "v1" => {
+                    upload_file_v1(
+                        file,
+                        file_key,
+                        &file_id,
+                        &address,
+                        port,
+                        signing_key,
+                        &mut alloc_mem,
+                    )
+                    .await?
+                }
                 "v2" => todo!("UDP protocol is WIP"),
                 _ => {
                     eprintln!("Unknown protocol: {}", protocol);
@@ -201,6 +246,22 @@ async fn main() -> Result<()> {
             file_key,
             file_id,
         }) => {
+            let user_path = get_user_key_dir()?;
+            let private_key_path = user_path.join("private_key.pem");
+            let public_key_path = user_path.join("public_key.pem");
+
+            if !private_key_path.exists() && public_key_path.exists() {
+                eprintln!("Public key exists but private key is missing, cannot pull.");
+                std::process::exit(1);
+            }
+
+            let signing_key = SigningKey::from_pkcs8_pem(
+                &tokio::fs::read_to_string(&private_key_path)
+                    .await
+                    .context("Failed to read private key for pull")?,
+            )
+            .context("Bad private key, cannot pull")?;
+
             let (file_id, file_key) = if let (Some(id), Some(key)) = (file_id, file_key) {
                 (id, key)
             } else {
@@ -232,7 +293,16 @@ async fn main() -> Result<()> {
 
             match protocol.as_str() {
                 "v1" => {
-                    download_file_v1(&file_id, file_key, dir, &address, port).await?;
+                    download_file_v1(
+                        &file_id,
+                        file_key,
+                        dir,
+                        &address,
+                        port,
+                        signing_key,
+                        &mut alloc_mem,
+                    )
+                    .await?;
 
                     let catalog_path = get_catalog_path()?;
 
@@ -281,28 +351,47 @@ async fn main() -> Result<()> {
             port,
             address,
             protocol,
-        }) => match protocol.as_str() {
-            "v1" => {
-                let status = get_server_status(&address, port).await?;
+        }) => {
+            let user_path = get_user_key_dir()?;
+            let private_key_path = user_path.join("private_key.pem");
+            let public_key_path = user_path.join("public_key.pem");
 
-                println!("Status timestamp: {}", status.timestamp);
-                println!("Uptime: {} hrs", status.uptime_hrs);
-                println!("Total Auth client: {}", status.auth_client);
-                println!(
-                    "Total {} uploads, {} downloads",
-                    status.total_uploaded, status.total_downloaded
-                );
-                println!("Bandwidth used: {} gb", status.total_bandwidth_used);
-            }
-            "v2" => {
-                todo!("UDP protocol is WIP")
-            }
-            _ => {
-                println!("Unknown protocol: {}", protocol);
+            if !private_key_path.exists() && public_key_path.exists() {
+                eprintln!("Public key exists but private key is missing, cannot pull.");
                 std::process::exit(1);
             }
-        },
-        None => {
+
+            let signing_key = SigningKey::from_pkcs8_pem(
+                &tokio::fs::read_to_string(&private_key_path)
+                    .await
+                    .context("Failed to read private key for pull")?,
+            )
+            .context("Bad private key, cannot pull")?;
+
+            match protocol.as_str() {
+                "v1" => {
+                    let status =
+                        get_server_status(&address, port, signing_key, &mut alloc_mem).await?;
+
+                    println!("Status timestamp: {}", status.timestamp);
+                    println!("Uptime: {} hrs", status.uptime_hrs);
+                    println!("Total Auth client: {}", status.auth_client);
+                    println!(
+                        "Total {} uploads, {} downloads",
+                        status.total_uploaded, status.total_downloaded
+                    );
+                    println!("Bandwidth used: {} gb", status.total_bandwidth_used);
+                }
+                "v2" => {
+                    todo!("UDP protocol is WIP")
+                }
+                _ => {
+                    eprintln!("Unknown protocol: {}", protocol);
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {
             ascii_art();
         }
     }

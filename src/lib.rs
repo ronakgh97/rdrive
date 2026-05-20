@@ -159,6 +159,7 @@ pub struct FileHistory {
 
 #[derive(Deserialize, Serialize, Default)]
 pub struct Catalog {
+    // TODO: key should be file hash not name
     pub file_map: HashMap<String, FileHistory>,
     pub file_index: HashMap<String, Vec<String>>,
 }

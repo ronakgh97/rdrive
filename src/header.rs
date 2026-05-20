@@ -11,7 +11,7 @@ pub struct ClientHello {
     pub x22519_key: [u8; 32],
     // #[serde(with = "BigArray")]
     // pub signature: [u8; 64],
-    pub nonce: [u8; 32], // must be 32 or hash256, I don't care you
+    pub nonce: [u8; 32], // must be 32 or hash256, I don't care about you
 }
 
 impl ClientHello {
@@ -29,7 +29,7 @@ pub struct ServerHello {
     pub x22519_key: [u8; 32],
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
-    pub nonce: [u8; 32], // must be 32 or hash256, I don't care you
+    pub nonce: [u8; 32], // must be 32 or hash256, I don't care about you
 }
 
 impl ServerHello {
@@ -165,9 +165,6 @@ pub struct UploadHeader {
     pub file_size: u64,
     pub file_hash: String,
     pub file_key: String,
-    pub ed25519_key_bytes: [u8; 32],
-    #[serde(with = "BigArray")]
-    pub signature: [u8; 64],
 }
 
 impl UploadHeader {
@@ -193,8 +190,11 @@ impl UploadHeader {
         if self.file_name.is_empty() {
             return Err(anyhow::anyhow!("File name cannot be empty"));
         }
-        if self.file_size == 0 || self.file_size > *MAX_FILE_SIZE {
-            return Err(anyhow::anyhow!("File size must be greater than zero"));
+        if self.file_size < 1024 * 1024 || self.file_size > *MAX_FILE_SIZE {
+            return Err(anyhow::anyhow!(
+                "File size must be between 1MB and {} MB",
+                *(MAX_FILE_SIZE) / 1024 * 1024
+            ));
         }
         if self.file_hash.is_empty() {
             return Err(anyhow::anyhow!("File hash cannot be empty"));
@@ -210,7 +210,7 @@ impl UploadHeader {
 #[derive(Serialize, Deserialize)]
 pub struct UploadResponse {
     pub file_id: String,
-    pub time_took: f32,
+    pub network_time: f32,
 }
 
 impl UploadResponse {
@@ -249,6 +249,7 @@ pub struct DownloadResponse {
     pub file_name: String,
     pub file_size: u64,
     pub file_hash: String,
+    pub network_time: f32,
 }
 
 impl DownloadResponse {

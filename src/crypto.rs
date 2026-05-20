@@ -4,13 +4,11 @@ use aes_gcm::{KeyInit, Nonce};
 use anyhow::Result;
 use rand::Rng;
 
-const NONCE_LEN: usize = 12;
-const TAG_LEN: usize = 16;
+pub const NONCE_LEN: usize = 12;
+pub const TAG_LEN: usize = 16;
 
 /// Encrypt `data` with a 32-byte `key` using AES-256-GCM,
-/// generates a random 12-byte nonce, and returns the output as:
-/// \[ nonce: 12 bytes ]\[ ciphertext: N bytes ]
-///
+/// returns a byte vector containing the nonce, ciphertext, and tag or an error if encryption fails.
 #[inline]
 pub fn encrypt_data(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
     // generate random 12-byte nonce
@@ -31,7 +29,7 @@ pub fn encrypt_data(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
 }
 
 /// Decrypt `data` that was encrypted with [`encrypt_data`],
-/// expects the first 12 bytes to be the nonce.
+/// returns the original plaintext or an error if decryption fails.
 #[inline]
 pub fn decrypt_data(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
     if data.len() < NONCE_LEN + TAG_LEN {
@@ -49,62 +47,70 @@ pub fn decrypt_data(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
     Ok(plaintext)
 }
 
-// TODO; fucking hell this fn sucks!!!!
 #[inline(always)]
-pub fn encrypt_data_in_place(buffer: &mut Vec<u8>, key: &[u8; 32]) -> Result<()> {
-    let plaintext_len = buffer.len();
+/// Encrypt `input` into `output` using AES-256-GCM with the provided 32-byte `key`.
+/// The `output` buffer must be at least `input.len() + NONCE_LEN + TAG_LEN` bytes long.
+/// Returns the total number of bytes written to `output` (nonce + ciphertext + tag) or an error if encryption fails.
+pub fn encrypt_into(input: &[u8], output: &mut [u8], key: &[u8; 32]) -> Result<usize> {
+    let plaintext_len = input.len();
 
-    // alloc space for nonce + tag
-    buffer.reserve(NONCE_LEN + TAG_LEN);
-    // move data between [NONCE...TAG_LEN]
-    buffer.resize(NONCE_LEN + plaintext_len + TAG_LEN, 0);
-    // copy data from front to the nonce_end
-    buffer.copy_within(0..plaintext_len, NONCE_LEN);
+    if output.len() < NONCE_LEN + plaintext_len + TAG_LEN {
+        anyhow::bail!(
+            "Output buffer too small, need at least {} bytes",
+            NONCE_LEN + plaintext_len + TAG_LEN
+        );
+    }
 
-    // fill nonce in the front overwriting the plaintext
-    rand::rng().fill_bytes(&mut buffer[..NONCE_LEN]);
+    let (nonce_buf, data_tag) = output.split_at_mut(NONCE_LEN);
+    let (data, tag_buf) = data_tag.split_at_mut(plaintext_len);
+
+    // fill nonce fresh
+    rand::rng().fill_bytes(nonce_buf);
+    // copy plaintext
+    data.copy_from_slice(input);
 
     let cipher = Aes256Gcm::new(key.into());
-    let nonce = Nonce::try_from(&buffer[..NONCE_LEN])?;
-    let data = &mut buffer[NONCE_LEN..NONCE_LEN + plaintext_len];
+    let nonce = Nonce::try_from(&*nonce_buf)?;
 
-    let tag = cipher
+    let auth_tag = cipher
         .encrypt_inout_detached(&nonce, b"", data.into())
-        .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!(e))?;
 
-    // copy tag attach to end
-    buffer[NONCE_LEN + plaintext_len..].copy_from_slice(&tag);
+    tag_buf.copy_from_slice(&auth_tag);
 
-    Ok(())
+    Ok(NONCE_LEN + plaintext_len + TAG_LEN)
 }
 
 #[inline(always)]
-pub fn decrypt_data_in_place(buffer: &mut Vec<u8>, key: &[u8; 32]) -> Result<()> {
-    if buffer.len() < NONCE_LEN + TAG_LEN {
+/// Decrypt `input` (which should be in the format produced by [`encrypt_into`]) into `output` using AES-256-GCM with the provided 32-byte `key`.
+/// The `output` buffer must be large enough (which will be `input.len() - NONCE_LEN - TAG_LEN` bytes).
+/// Returns the number of bytes written to `output` (the length of the decrypted plaintext) or an error if decryption fails.
+pub fn decrypt_into(input: &[u8], output: &mut [u8], key: &[u8; 32]) -> Result<usize> {
+    if input.len() < NONCE_LEN + TAG_LEN {
         anyhow::bail!("Ciphertext too short");
     }
+    let ciphertext_len = input.len() - NONCE_LEN - TAG_LEN;
 
-    let total_len = buffer.len();
-
-    let ciphertext_len = total_len - NONCE_LEN - TAG_LEN;
+    if output.len() < ciphertext_len {
+        anyhow::bail!(
+            "Output buffer too small, need at least {} bytes",
+            ciphertext_len
+        );
+    }
     let cipher = Aes256Gcm::new(key.into());
-    let nonce = Nonce::try_from(&buffer[..NONCE_LEN])?;
 
-    // extract tag
-    let tag = Tag::try_from(&buffer[NONCE_LEN + ciphertext_len..])?;
-    // Ciphertext region only
-    let data = &mut buffer[NONCE_LEN..NONCE_LEN + ciphertext_len];
+    // extract nonce & tag
+    let nonce = Nonce::try_from(&input[..NONCE_LEN])?;
+    let tag = Tag::try_from(&input[NONCE_LEN + ciphertext_len..])?;
+    // ciphertext region only
+    let data = &mut output[..ciphertext_len];
+    data.copy_from_slice(&input[NONCE_LEN..NONCE_LEN + ciphertext_len]);
 
     cipher
         .decrypt_inout_detached(&nonce, b"", data.into(), &tag)
         .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))?;
 
-    // move plaintext back to front
-    buffer.copy_within(NONCE_LEN..NONCE_LEN + ciphertext_len, 0);
-    // remove nonce + tag
-    buffer.truncate(ciphertext_len);
-
-    Ok(())
+    Ok(ciphertext_len)
 }
 
 /// Generate a generic random 32-byte key and return it as a hex string
@@ -178,19 +184,22 @@ fn crypto_in_place_test() -> Result<()> {
     let mut data = vec![0u8; 64 * 1024 * 1024];
     rand::rng().fill_bytes(&mut data);
 
-    let original = data.clone();
-    encrypt_data_in_place(&mut data, &key)?;
-    assert_eq!(data.len(), original.len() + NONCE_LEN + TAG_LEN);
+    let mut encrypted_buf = vec![0u8; NONCE_LEN + data.len() + TAG_LEN];
+    encrypt_into(&data, &mut encrypted_buf, &key)?;
+    assert_eq!(data.len(), data.len() + NONCE_LEN + TAG_LEN);
 
-    decrypt_data_in_place(&mut data, &key)?;
-    assert_eq!(data, original);
+    let mut decrypted_buf = vec![0u8; data.len()];
+    decrypt_into(&encrypted_buf, &mut decrypted_buf, &key)?;
+    assert_eq!(decrypted_buf, data);
 
-    let mut empty = Vec::new();
-    encrypt_data_in_place(&mut empty, &key)?;
-    assert_eq!(empty.len(), NONCE_LEN + TAG_LEN);
+    let empty = Vec::new();
+    let mut encrypted_buf = vec![0u8; NONCE_LEN + TAG_LEN];
+    encrypt_into(&empty, &mut encrypted_buf, &key)?;
+    assert_eq!(encrypted_buf.len(), NONCE_LEN + TAG_LEN);
 
-    decrypt_data_in_place(&mut empty, &key)?;
-    assert!(empty.is_empty());
+    let mut decrypted_buf = vec![0u8; encrypted_buf.len()];
+    decrypt_into(&encrypted_buf, &mut decrypted_buf, &key)?;
+    assert_eq!(decrypted_buf, data);
 
     Ok(())
 }
