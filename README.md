@@ -106,7 +106,7 @@ TODO
 - Fix and improve the buffering and streaming for large files (diff hashing, chunking, chopping, etc.)
 - More protocol features like file listing, metadata retrieval, more commands etc. [DONE]
 - Graceful shutdown and cleanup
-- Little bit client polish
+- Little bit client polish, prefer 256 512 Hash over of raw hex, where can
 - Protocol v2 meant to be use UDP, but skill issues...
 - Encrypted share feature between clients (stateless relay server) without sharing the master key, maybe using some kind
   of temporary keys or
@@ -126,6 +126,7 @@ TODO
 - Recoverable keys somehow?, better recover & key backups
 - Global Memory Pool per connection [Partially DONE]
 - Internal server error feedback or other similar
+- Serialize overhead, some header does not that, fixed slice will do!!
 
 https://www.backblaze.com/docs/cloud-storage-about-backblaze-b2-cloud-storage
 https://www.rfc-editor.org/rfc/rfc8032

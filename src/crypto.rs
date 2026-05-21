@@ -186,7 +186,7 @@ fn crypto_in_place_test() -> Result<()> {
 
     let mut encrypted_buf = vec![0u8; NONCE_LEN + data.len() + TAG_LEN];
     encrypt_into(&data, &mut encrypted_buf, &key)?;
-    assert_eq!(data.len(), data.len() + NONCE_LEN + TAG_LEN);
+    assert_eq!(encrypted_buf.len(), data.len() + NONCE_LEN + TAG_LEN);
 
     let mut decrypted_buf = vec![0u8; data.len()];
     decrypt_into(&encrypted_buf, &mut decrypted_buf, &key)?;

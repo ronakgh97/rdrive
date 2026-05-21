@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use ed25519_dalek::ed25519::signature::AsyncVerifier;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-use ed25519_dalek::pkcs8::{DecodePublicKey, EncodePublicKey};
+use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePublicKey};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hex::encode;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -108,7 +108,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
         // format [k]..[1]..[k]..[1]
         let mut key = [1u8; 128];
         key[0..32].copy_from_slice(&shared_key);
-        key[64..128].copy_from_slice(&shared_key);
+        key[64..96].copy_from_slice(&shared_key);
         Sha256::digest(key).into() // TODO; I HATEEEEE ".into()" SO MUCHHHHHHH
     };
 
@@ -275,23 +275,63 @@ async fn read_encrypt_data_into<'a, R: AsyncReadExt + Unpin>(
     session_key: &[u8; 32],
     mem_pool: &'a mut Vec<u8>,
 ) -> Result<&'a [u8]> {
-    let len = read_frame_length(reader).await? as usize;
+    let ciphertext_len = read_frame_length(reader).await? as usize;
 
-    if len < NONCE_LEN + TAG_LEN {
-        anyhow::bail!("Frame length too short for encrypted header: {}", len);
+    if ciphertext_len < NONCE_LEN + TAG_LEN {
+        anyhow::bail!(
+            "Frame length too short for encrypted header: {}",
+            ciphertext_len
+        );
     }
-    if mem_pool.len() < len + (len - NONCE_LEN - TAG_LEN) {
-        mem_pool.resize(len + (len - NONCE_LEN - TAG_LEN), 0);
+    let plaintext_len = ciphertext_len - NONCE_LEN - TAG_LEN;
+
+    // should accommodate both encrypted & decrypted chunk
+    if mem_pool.len() < ciphertext_len + plaintext_len {
+        mem_pool.resize(ciphertext_len + plaintext_len, 0);
     }
 
-    let (encrypted_slot, decrypted_slot) = mem_pool.split_at_mut(len);
-    let encrypted_buf = &mut encrypted_slot[..len];
+    let (encrypted_chunk, decrypted_chunk) = mem_pool.split_at_mut(ciphertext_len);
+    let encrypted_buf = &mut encrypted_chunk[..ciphertext_len];
     reader.read_exact(encrypted_buf).await?;
 
-    let decrypted_buf = &mut decrypted_slot[..len - TAG_LEN - NONCE_LEN];
+    let decrypted_buf = &mut decrypted_chunk[..plaintext_len];
     decrypt_into(encrypted_buf, decrypted_buf, session_key)?;
 
     Ok(decrypted_buf)
+}
+
+/// Write encrypted data with 4-byte length prefix, return error on write failure or encryption failure
+#[inline(always)]
+async fn write_encrypt_frame<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    data: &[u8],
+    session_key: &[u8; 32],
+    mem_pool: &mut Vec<u8>,
+) -> Result<()> {
+    let plaintext_len = data.len();
+    if plaintext_len > u32::MAX as usize {
+        return Err(anyhow::anyhow!(
+            "Too large content: {} bytes",
+            plaintext_len
+        ));
+    }
+
+    let ciphertext_len = NONCE_LEN + plaintext_len + TAG_LEN;
+    let total_frame_len = 4 + ciphertext_len;
+
+    // alloc if less
+    if mem_pool.len() < total_frame_len {
+        mem_pool.resize(total_frame_len, 0);
+    }
+
+    let len_bytes = (ciphertext_len as u32).to_be_bytes();
+    mem_pool[..4].copy_from_slice(&len_bytes); // 4-byte prefix
+
+    // encrypt that
+    encrypt_into(data, &mut mem_pool[4..total_frame_len], session_key)?;
+    writer.write_all(&mem_pool[..total_frame_len]).await?;
+    writer.flush().await?;
+    Ok(())
 }
 
 /// Read raw data in-place with timeout, return error on timeout or read failure, no decryption
@@ -306,35 +346,8 @@ async fn read_raw_data_into<R: AsyncReadExt + Unpin>(
     Ok(())
 }
 
-/// Write encrypted data with 4-byte length prefix, return error on write failure or encryption failure
-#[inline(always)]
-async fn write_encrypt_frame<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    data: &[u8],
-    session_key: &[u8; 32],
-    mem_pool: &mut [u8],
-) -> Result<()> {
-    let plaintext_len = data.len();
-    if plaintext_len > u32::MAX as usize {
-        return Err(anyhow::anyhow!(
-            "Too large content: {} bytes",
-            plaintext_len
-        ));
-    }
-    let ciphertext_len = NONCE_LEN + plaintext_len + TAG_LEN;
-    let total_frame_len = 4 + ciphertext_len;
-
-    let len_bytes = (ciphertext_len as u32).to_be_bytes();
-    mem_pool[..4].copy_from_slice(&len_bytes); // 4-byte prefix
-
-    // encrypt that
-    encrypt_into(data, &mut mem_pool[4..total_frame_len], session_key)?;
-    writer.write_all(&mem_pool[..total_frame_len]).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
 /// Write a raw frame with 4-byte length prefix, return error on write failure, no encryption
+#[inline(always)]
 async fn write_raw_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> Result<()> {
     let len = data.len();
     if len > u32::MAX as usize {
@@ -355,7 +368,7 @@ async fn send_success<W: AsyncWriteExt + Unpin, T: Serialize>(
     writer: &mut W,
     response: &T,
     session_key: &[u8; 32],
-    mem_pool: &mut [u8],
+    mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
     let mut rsp = Vec::with_capacity(1 + 96);
     rsp.push(1u8); // 1 = success
@@ -376,7 +389,7 @@ async fn send_warn<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     response: WarnHeader,
     session_key: &[u8; 32],
-    mem_pool: &mut [u8],
+    mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
     let payload_bytes = response.serialize()?;
     let mut rsp = Vec::with_capacity(1 + payload_bytes.len());
@@ -397,7 +410,7 @@ async fn send_failed<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     response: ErrorHeader,
     session_key: &[u8; 32],
-    mem_pool: &mut [u8],
+    mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
     let payload_bytes = response.serialize()?;
     let mut rsp = Vec::with_capacity(1 + payload_bytes.len());
@@ -417,7 +430,7 @@ async fn send_failed<W: AsyncWriteExt + Unpin>(
 async fn send_status<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     session_key: &[u8; 32],
-    mem_pool: &mut [u8],
+    mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
     let uptime_hrs = try_get_uptime_hrs();
 
@@ -476,8 +489,7 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let (x25519_pri, x25519_pub) = generate_x25519_keypair()?;
 
     // prepare server_hello
-    let server_hello_data = {
-        use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
+    let server_hello = {
         let mut nonce = [0u8; 32];
         rand::rng().fill_bytes(&mut nonce);
 
@@ -496,7 +508,7 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         })?;
 
         // construct data to be signed
-        let mut data_signed = [0u8; 128];
+        let mut data_signed = [9u8; 128];
         data_signed[0..32].copy_from_slice(&client_hello.nonce);
         data_signed[32..64].copy_from_slice(&nonce);
         data_signed[64..96].copy_from_slice(&client_hello.x22519_key);
@@ -505,23 +517,34 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         use ed25519_dalek::ed25519::signature::AsyncSigner;
         let signature = ed22519_pri.sign_async(&data_signed).await?;
 
-        let server_hello = ServerHello {
+        ServerHello {
             ed25519_key: ed22519_pub.to_bytes(),
             x22519_key: x25519_pub.to_bytes(),
             signature: signature.to_bytes(),
             nonce,
-        };
-        server_hello.serialize()?
+        }
     };
 
     // send Hello to client
-    timeout(WRITE_TIMEOUT, write_raw_frame(writer, &server_hello_data)).await??;
+    timeout(
+        WRITE_TIMEOUT,
+        write_raw_frame(writer, &server_hello.serialize()?),
+    )
+    .await??;
+
+    // explicit flush
+    writer.flush().await?;
+
+    //--- client will auth check the server
 
     // send nonce
     let mut nonce = [0u8; 64];
     rand::rng().fill_bytes(&mut nonce);
     nonce = Sha512::digest(nonce).into();
     write_raw_frame(writer, &nonce).await?;
+
+    // explicit flush b4 only read
+    writer.flush().await?;
 
     // TODO: key headers in auth are bloated, we can use this later
 
@@ -569,12 +592,11 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     // doing this again
     let mut nonce = [0u8; 32];
+    rand::rng().fill_bytes(&mut nonce);
     {
-        rand::rng().fill_bytes(&mut nonce);
+        // this is cool
         nonce = Sha256::digest(nonce).into();
-        rand::rng().fill_bytes(&mut nonce);
         nonce = Sha256::digest(nonce).into();
-        rand::rng().fill_bytes(&mut nonce);
         nonce = Sha256::digest(nonce).into();
     }
     // TODO; we are sending nonce challenge regardless of authenticity of client, hmm?
@@ -629,7 +651,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                     .to_string(),
                             },
                             session_key,
-                            mem_pool
+                            mem_pool,
                         ).await?;
 
                         return Ok(());
@@ -647,7 +669,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                 message: "Auth key path exists but is not a directory, skipping user storage dir creation".to_string(),
                             },
                             session_key,
-                            mem_pool
+                            mem_pool,
                         ).await?;
 
                         return Ok(());
@@ -694,7 +716,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                     .to_string(),
                             },
                             session_key,
-                            mem_pool
+                            mem_pool,
                         ).await?;
                         return Ok(());
                     }
@@ -836,7 +858,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     storage_path: &Path,
     session_key: &[u8; 32],
     client_key: &[u8; 32],
-    mem_pool: &mut [u8],
+    mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
     let file_id = headers.file_id.clone();
     let file_lock = hold_file_lock(&file_id);
@@ -891,26 +913,21 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let mut buf_file = BufWriter::with_capacity(READ_CHUNK_SIZE * 2, file);
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
-    let enc_buf = vec![0u8; READ_CHUNK_SIZE + NONCE_LEN + TAG_LEN];
+    let mut enc_buf = vec![0u8; READ_CHUNK_SIZE + NONCE_LEN + TAG_LEN];
     let mut dec_buf = vec![0u8; READ_CHUNK_SIZE];
 
     // TODO; client is send already double encrypted chunk,
     //  so HERE decrypt is network layer
     {
         while received < headers.file_size {
-            let remaining = (headers.file_size - received) as usize;
-            let to_read = min(enc_buf.len(), remaining);
-
+            let plain_text = min(READ_CHUNK_SIZE, (headers.file_size - received) as usize);
+            let cipher_text = NONCE_LEN + plain_text + TAG_LEN;
+            reader.read_exact(&mut enc_buf[..cipher_text]).await?;
             // decrypt file chunks
-            let dec_len = decrypt_into(&enc_buf[..to_read], &mut dec_buf[..to_read], session_key)?;
-
-            let n = reader.read(&mut dec_buf[..dec_len]).await?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&dec_buf[..n]);
-            buf_file.write_all(&dec_buf[..n]).await?;
-            received += n as u64;
+            let dec_len = decrypt_into(&enc_buf[..cipher_text], &mut dec_buf, session_key)?;
+            hasher.update(&dec_buf[..dec_len]);
+            buf_file.write_all(&dec_buf[..dec_len]).await?;
+            received += dec_len as u64;
         }
     }
     buf_file.flush().await?;
@@ -977,7 +994,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     storage_path: &Path,
     session_key: &[u8; 32],
     client_key: &[u8; 32],
-    mem_pool: &mut [u8],
+    mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
     let file_id = headers.file_id.clone();
     let file_lock = hold_file_lock(&file_id);
@@ -1105,7 +1122,6 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         }
         // encrypt file chunks
         let enc_len = encrypt_into(&plan_buf[..n], &mut enc_buf, session_key)?;
-
         writer.write_all(&enc_buf[..enc_len]).await?;
     }
 
@@ -1145,36 +1161,26 @@ async fn client_handshake_helper(
     let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
     let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
 
-    let mut nonce = [0u8; 32];
-    rand::rng().fill_bytes(&mut nonce);
     let (x25519_pri, x25519_pub) = generate_x25519_keypair()?;
 
-    let client_hello_data = ClientHello {
-        x22519_key: x25519_pub.to_bytes(),
-        nonce,
-    }
-    .serialize()?;
+    let client_hello = {
+        let mut nonce = [0u8; 32];
+        rand::rng().fill_bytes(&mut nonce);
+        ClientHello {
+            x22519_key: x25519_pub.to_bytes(),
+            nonce,
+        }
+    };
 
-    write_raw_frame(&mut writer, &client_hello_data).await?; // send client hello
+    // send client Hello first
+    write_raw_frame(&mut writer, &client_hello.serialize()?).await?; // send client hello
 
+    // read server Hello
     let server_hello = {
         let mut buf = vec![];
         read_raw_data_into(&mut reader, &mut buf).await?; // read server hello
         ServerHello::deserialize(&buf)?
     };
-
-    // do nonce challenge here, saves us from doing per cmd
-    let mut nonce = vec![0u8; 64];
-    read_raw_data_into(&mut reader, &mut nonce).await?; // read nonce challenge
-
-    let signature: [u8; 64] = signing_key.sign(&nonce).to_bytes();
-    let pub_key = signing_key.verifying_key().to_bytes();
-
-    // format [64][32]
-    let mut packet = [0u8; 96];
-    packet[0..64].copy_from_slice(&signature);
-    packet[64..96].copy_from_slice(&pub_key);
-    write_raw_frame(&mut writer, &packet).await?; // send signature and pubkey
 
     // we check server_map, proceed with caller handler or reject
     let mut authorized_server =
@@ -1190,10 +1196,10 @@ async fn client_handshake_helper(
     let trusted_key =
         if let Some(existing_server_pem) = authorized_server.server_map.get(&server_ip) {
             if existing_server_pem != &server_key_pem {
-                println!("{} {}", "WARNING: server key changed for".red(), server_ip);
-                println!("{}\n{}", "Before:".yellow(), existing_server_pem);
-                println!("{}\n{}", "After:".yellow(), server_key_pem);
-                println!("Trust new key? [y/N]");
+                println!("WARNING: server key changed for {}", server_ip);
+                println!("Before:\n{}", existing_server_pem);
+                println!("After:\n{}", server_key_pem);
+                print!("Trust new key? [y/N]");
 
                 let mut input = String::new();
                 std::io::stdin()
@@ -1220,7 +1226,7 @@ async fn client_handshake_helper(
         } else {
             println!("Unknown server ip: {}", server_ip);
             println!("Server key:\n{}", server_key_pem);
-            println!("Trust this server? [y/N]");
+            print!("Trust this server? [y/N]");
 
             let mut input = String::new();
             std::io::stdin()
@@ -1241,8 +1247,8 @@ async fn client_handshake_helper(
         };
 
     // construct signed payload SAME AS SERVER
-    let mut data_signed = [0u8; 128];
-    data_signed[0..32].copy_from_slice(&nonce);
+    let mut data_signed = [9u8; 128];
+    data_signed[0..32].copy_from_slice(&client_hello.nonce);
     data_signed[32..64].copy_from_slice(&server_hello.nonce);
     data_signed[64..96].copy_from_slice(&x25519_pub.to_bytes());
     data_signed[96..128].copy_from_slice(&server_hello.x22519_key);
@@ -1254,6 +1260,22 @@ async fn client_handshake_helper(
         .verify(&data_signed, &signature)
         .context("Server signature verification failed")?;
 
+    // do nonce challenge here, saves us from doing per cmd
+    let mut nonce = vec![0u8; 64];
+    read_raw_data_into(&mut reader, &mut nonce).await?; // read nonce challenge
+
+    let signature: [u8; 64] = signing_key.sign(&nonce).to_bytes();
+    let pub_key = signing_key.verifying_key().to_bytes();
+
+    // format [64][32]
+    let mut packet = [0u8; 96];
+    packet[0..64].copy_from_slice(&signature);
+    packet[64..96].copy_from_slice(&pub_key);
+    write_raw_frame(&mut writer, &packet).await?; // send signature and pubkey
+
+    // explicit flush
+    writer.flush().await?;
+
     let session_key = {
         use x25519_dalek::PublicKey;
 
@@ -1263,7 +1285,7 @@ async fn client_handshake_helper(
         // same as server
         let mut key = [1u8; 128];
         key[0..32].copy_from_slice(&shared_key);
-        key[64..128].copy_from_slice(&shared_key);
+        key[64..96].copy_from_slice(&shared_key);
         Sha256::digest(key).into() // TODO; I HATEEEEE ".into()" SO MUCHHHHHHH
     };
 
@@ -1374,7 +1396,6 @@ pub async fn upload_client(
     let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
     let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
 
-    let pg_bar = ProgressBar::new(file_size);
     println!(
         "Starting upload: {} ({} mb)",
         file_name,
@@ -1386,6 +1407,13 @@ pub async fn upload_client(
         .context("Failed to compute file hash")?;
     println!("File hash: {}", file_hash.dimmed());
 
+    let pg_bar = ProgressBar::new(file_size);
+    pg_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("↪ [{bar:60.blue/cyan}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+            .progress_chars("▨◻-"),
+    );
+
     let request = Command::Upload(UploadHeader {
         file_id: file_id.to_string(),
         file_name,
@@ -1394,12 +1422,6 @@ pub async fn upload_client(
         file_key,
     })
     .serialize()?;
-
-    pg_bar.set_style(
-        ProgressStyle::default_bar()
-            .template("↪ [{bar:60.blue/cyan}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
-            .progress_chars("▨◻-"),
-    );
 
     write_encrypt_frame(&mut writer, &request, &session_key, mem_pool) // send header request
         .await
@@ -1425,7 +1447,7 @@ pub async fn upload_client(
     let mut plan_buf = vec![0u8; READ_CHUNK_SIZE];
     let mut enc_buf = vec![0u8; READ_CHUNK_SIZE + NONCE_LEN + TAG_LEN];
 
-    // TODO; encrypt locally with file-key
+    // TODO; encrypt locally with file-key BUT WHAT ABOUT HASH CHECK?
 
     loop {
         let n = buf_file
@@ -1438,7 +1460,6 @@ pub async fn upload_client(
 
         // encrypt file chunks
         let enc_len = encrypt_into(&plan_buf[..n], &mut enc_buf, &session_key)?;
-
         writer
             // send only encrypted part
             .write_all(&enc_buf[..enc_len])
@@ -1459,10 +1480,9 @@ pub async fn upload_client(
     } else if response[0] == 0x2u8 {
         let warn = WarnHeader::deserialize(&response[1..])?;
         println!("Upload warning: {} - {}", warn.code, warn.message);
-    } else {
+    } else if response[0] != 0x1u8 {
         anyhow::bail!("Unknown header byte: {}", response[0]);
     }
-
     let rsp = UploadResponse::deserialize(&response[1..])?;
 
     stream.shutdown().await?;
@@ -1514,7 +1534,7 @@ pub async fn download_client(
     } else if header_bytes[0] == 0x2u8 {
         let warn = WarnHeader::deserialize(&header_bytes[1..])?;
         println!("Download warning: {} - {}", warn.code, warn.message);
-    } else {
+    } else if header_bytes[0] != 0x1u8 {
         anyhow::bail!("Unknown header byte: {}", header_bytes[0]);
     }
 
@@ -1545,22 +1565,17 @@ pub async fn download_client(
     let mut dec_buf = vec![0u8; READ_CHUNK_SIZE];
 
     while received < response.file_size {
-        let remaining_bytes = (response.file_size - received) as usize;
-        let to_read = min(enc_buf.len(), remaining_bytes);
-
+        let plain_text = min(READ_CHUNK_SIZE, (response.file_size - received) as usize);
+        let cipher_text = NONCE_LEN + plain_text + TAG_LEN;
         let n = reader
-            .read(&mut enc_buf[..to_read])
+            .read_exact(&mut enc_buf[..cipher_text])
             .await
             .context("Failed to read file data")?;
-        if n == 0 {
-            break;
-        }
-
-        let dec_len = decrypt_into(&enc_buf[..n], &mut dec_buf, &session_key)?;
-
+        // decrypt file chunks
+        let dec_len = decrypt_into(&enc_buf[..cipher_text], &mut dec_buf, &session_key)?;
         hasher.update(&dec_buf[..dec_len]);
         buf_file.write_all(&dec_buf[..dec_len]).await?;
-        received += n as u64;
+        received += dec_len as u64;
         pg_bar.inc(n as u64);
     }
 
