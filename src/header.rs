@@ -178,7 +178,7 @@ impl UploadHeader {
     }
 
     pub fn validate(&self) -> Result<()> {
-        // TODO: we dont need check or sanitized, just use hash
+        // TODO: we dont need check or sanitized, just use hash, no more path injection
         if self.file_id.is_empty() || !(32..=256).contains(&self.file_id.len()) {
             return Err(anyhow::anyhow!(
                 "File ID must be a non-empty hex string between 32 and 256 characters, without control characters"
@@ -190,7 +190,7 @@ impl UploadHeader {
         if self.file_size < 1024 * 1024 || self.file_size > *MAX_FILE_SIZE_GB {
             return Err(anyhow::anyhow!(
                 "File size must be between 1MB and {} GB",
-                *MAX_FILE_SIZE_GB
+                *MAX_FILE_SIZE_GB / (1024 * 1024 * 1024)
             ));
         }
         if self.file_hash.is_empty() {

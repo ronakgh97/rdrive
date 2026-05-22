@@ -1,6 +1,6 @@
 FROM rust:1.94.1-slim-bookworm AS builder
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends\
     pkg-config \
     libssl-dev \
     build-essential \
@@ -14,11 +14,12 @@ COPY src ./src
 
 RUN cargo build --release --bin rdrive-server
 
-FROM debian:bookworm-slim
+FROM debian:13-slim
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
+    openssl \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -33,11 +34,12 @@ RUN chmod +x /app/docker-entrypoint.sh
 RUN mkdir -p /home/rdrive/.rdrive/storage
 
 EXPOSE 3000
-
-ENV LOG_LEVEL=debug
 ENV HOME=/home/rdrive
-ENV MAX_CONNECTIONS=128
-ENV MAX_FILE_SIZE="12 * 1024 * 1024 * 1024"
+ENV LOG_LEVEL=debug
+ENV PORT=3000
+ENV MAX_CONNECTION=128
+ENV MAX_FILE_SIZE_GB="6 * 1024 * 1024 * 1024"
+ENV ENABLE_CLIENT_WHITELIST=true
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD test -f /app/rdrive-server || exit 1
 

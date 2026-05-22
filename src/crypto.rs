@@ -2,7 +2,9 @@ use aes_gcm::aead::Aead;
 use aes_gcm::{AeadInOut, Aes256Gcm, Tag};
 use aes_gcm::{KeyInit, Nonce};
 use anyhow::Result;
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand::Rng;
+use x25519_dalek::{EphemeralSecret, PublicKey};
 
 pub const NONCE_LEN: usize = 12;
 pub const TAG_LEN: usize = 16;
@@ -83,7 +85,7 @@ pub fn encrypt_into(input: &[u8], output: &mut [u8], key: &[u8; 32]) -> Result<u
 
 #[inline(always)]
 /// Decrypt `input` (which should be in the format produced by [`encrypt_into`]) into `output` using AES-256-GCM with the provided 32-byte `key`.
-/// The `output` buffer must be large enough (which will be `input.len() - NONCE_LEN - TAG_LEN` bytes).
+/// The `output` buffer must  be `input.len() - NONCE_LEN - TAG_LEN` bytes.
 /// Returns the number of bytes written to `output` (the length of the decrypted plaintext) or an error if decryption fails.
 pub fn decrypt_into(input: &[u8], output: &mut [u8], key: &[u8; 32]) -> Result<usize> {
     if input.len() < NONCE_LEN + TAG_LEN {
@@ -122,8 +124,6 @@ pub fn generate_b32key() -> String {
     hex::encode(key)
 }
 
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
-
 /// Generates and returns a new Ed25519 keypair as hex strings (private_key, public_key)
 #[inline]
 pub fn generate_ed25519_keypair() -> Result<(SigningKey, VerifyingKey)> {
@@ -142,7 +142,6 @@ pub fn generate_ed25519_keypair() -> Result<(SigningKey, VerifyingKey)> {
     Ok((private_key, public_key))
 }
 
-use x25519_dalek::{EphemeralSecret, PublicKey};
 /// Generates and returns a new X25519 keypair (private_key, public_key)
 #[inline(always)]
 pub fn generate_x25519_keypair() -> Result<(EphemeralSecret, PublicKey)> {
@@ -198,8 +197,8 @@ fn crypto_in_place_test() -> Result<()> {
     assert_eq!(encrypted_buf.len(), NONCE_LEN + TAG_LEN);
 
     let mut decrypted_buf = vec![0u8; encrypted_buf.len()];
-    decrypt_into(&encrypted_buf, &mut decrypted_buf, &key)?;
-    assert_eq!(decrypted_buf.len(), NONCE_LEN + TAG_LEN);
+    let plaintext_len = decrypt_into(&encrypted_buf, &mut decrypted_buf, &key)?;
+    assert_eq!(plaintext_len, 0);
 
     Ok(())
 }

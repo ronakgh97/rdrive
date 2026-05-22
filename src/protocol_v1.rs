@@ -578,12 +578,8 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         nonce = Sha256::digest(nonce).into();
     }
 
-    // TODO; we are sending nonce challenge regardless of authenticity of client, hmm?
-    //  will this need x25519 encryption? (app level or network level?),
-    //  I'm trying to come up with shared header flow, to reduce brain damage
     // send nonce challenge to client for signature verification, FIRST
     // hashing for good sake, 32 bytes nice
-
     timeout(
         WRITE_TIMEOUT,
         write_encrypt_frame(writer, &nonce, session_key, mem_pool),
@@ -1112,7 +1108,8 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-/// Perform client-side handshake: connect to server, exchange hellos, verify server key, do nonce challenge, return session key and server's ed25519 key for handler use
+/// Perform client-side handshake: connect to server, exchange hellos, verify server key, do nonce challenge,
+/// return session key and tcp stream for forward handlers
 async fn client_handshake_helper(
     host: &str,
     port: u16,
@@ -1565,6 +1562,7 @@ pub async fn download_client(
     Ok(output_path)
 }
 
+/// Client function to get server status: connect to server, send status request, read and return status response, handle errors
 pub async fn get_server_status(
     host: &str,
     port: u16,

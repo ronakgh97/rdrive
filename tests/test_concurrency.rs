@@ -1,20 +1,20 @@
-use r_drive::header::{
-    Command, DownloadHeader, DownloadResponse, ErrorHeader, UploadHeader, UploadResponse,
+use r_drive::crypto::generate_ed25519_keypair;
+use r_drive::protocol_v1::{download_client, upload_client};
+use r_drive::{
+    AuthServerMap, SERVER_TRACKER, get_authorized_server_map_path, get_server_key_dir,
+    get_storage_dir,
 };
-use r_drive::{SERVER_TRACKER, get_storage_dir};
 use rand::Rng;
-use sha2::{Digest, Sha256};
-use std::io::ErrorKind;
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, JoinSet};
 use uuid::Uuid;
 
-pub const TEST_FILE_SIZE: usize = 32 * 1024 * 1024;
+pub const TEST_FILE_SIZE: usize = 8 * 1024 * 1024;
 
 static SHARED_TRACKER: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -25,19 +25,6 @@ fn share_lock() -> &'static tokio::sync::Mutex<()> {
 fn free_port() -> u16 {
     let bind = TcpListener::bind("127.0.0.1:0").unwrap();
     bind.local_addr().unwrap().port()
-}
-
-async fn cleanup_storage() {
-    let path = get_storage_dir().await.expect("Failed to get storage path");
-    if let Err(err) = tokio::fs::remove_dir_all(&path).await {
-        assert_eq!(
-            err.kind(),
-            ErrorKind::NotFound,
-            "Failed to remove storage dir {}: {}",
-            path.display(),
-            err
-        );
-    }
 }
 
 async fn wait_for_server(port: u16) {
@@ -72,126 +59,50 @@ async fn stop_server(handle: JoinHandle<()>) {
     let _ = handle.await;
 }
 
-async fn write_frame(stream: &mut TcpStream, data: &[u8]) {
-    let len = (data.len() as u32).to_be_bytes();
-    stream.write_all(&len).await.unwrap();
-    stream.write_all(data).await.unwrap();
+fn setup_temp_home() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+        std::env::set_var("USERPROFILE", tmp.path());
+    }
+    tmp
 }
 
-async fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await.unwrap();
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await.unwrap();
-    buf
+async fn prepare_server_keys() -> Vec<u8> {
+    let (pri, pub_) = generate_ed25519_keypair().unwrap();
+    let key_dir = get_server_key_dir().unwrap();
+    tokio::fs::create_dir_all(&key_dir).await.unwrap();
+
+    tokio::fs::write(
+        key_dir.join("public_ed25519.key"),
+        hex::encode(pub_.to_bytes()),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        key_dir.join("private_ed25519.key"),
+        hex::encode(pri.to_bytes()),
+    )
+    .await
+    .unwrap();
+
+    pub_.to_bytes().to_vec()
 }
 
-async fn v1_client_upload(port: u16, data: &[u8], filename: &str, file_key: &str) -> String {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+/// Pre-seed the server map so client_handshake_helper skips the stdin TOFU prompt.
+async fn prepare_server_map(port: u16, pub_key_bytes: &[u8]) {
+    let map_path = get_authorized_server_map_path().unwrap();
+    tokio::fs::create_dir_all(map_path.parent().unwrap())
         .await
         .unwrap();
 
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let file_hash = hex::encode(hasher.finalize()).to_string();
-
-    let header = UploadHeader {
-        file_id: Uuid::new_v4().simple().to_string(),
-        file_name: filename.to_string(),
-        file_size: data.len() as u64,
-        file_hash,
-        file_key: file_key.to_string(),
+    let mut map = AuthServerMap {
+        server_map: HashMap::from([(
+            format!("127.0.0.1:{}", port).parse().unwrap(),
+            hex::encode(pub_key_bytes),
+        )]),
     };
-    let request_bytes = Command::Upload(header).serialize().unwrap();
-
-    write_frame(&mut stream, &request_bytes).await;
-    stream.write_all(data).await.unwrap();
-    stream.flush().await.unwrap();
-
-    let ack_bytes = read_frame(&mut stream).await;
-    match ack_bytes.first().copied() {
-        Some(1) => {}
-        Some(2) => {
-            let err = ErrorHeader::deserialize(&ack_bytes[1..]).unwrap();
-            panic!(
-                "v1 upload failed during ACK: {} - {}",
-                err.code, err.message
-            );
-        }
-        Some(other) => panic!("v1 upload failed: unexpected ACK tag {}", other),
-        None => panic!("v1 upload failed: empty ACK frame"),
-    }
-
-    let resp_bytes = read_frame(&mut stream).await;
-    match resp_bytes.first().copied() {
-        Some(1) => {}
-        Some(2) => {
-            let err = ErrorHeader::deserialize(&resp_bytes[1..]).unwrap();
-            panic!("v1 upload failed: {} - {}", err.code, err.message);
-        }
-        Some(other) => panic!("v1 upload failed: unexpected response tag {}", other),
-        None => panic!("v1 upload failed: empty response frame"),
-    }
-
-    let response = UploadResponse::deserialize(&resp_bytes[1..]).unwrap();
-
-    response.file_id
-}
-
-async fn v1_client_download(port: u16, file_id: &str, file_key: &str) -> Vec<u8> {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .await
-        .unwrap();
-
-    let header = DownloadHeader {
-        file_id: file_id.to_string(),
-        file_key: file_key.to_string(),
-    };
-    let request_bytes = Command::Download(header).serialize().unwrap();
-
-    write_frame(&mut stream, &request_bytes).await;
-    stream.flush().await.unwrap();
-
-    let hdr_bytes = read_frame(&mut stream).await;
-    match hdr_bytes.first().copied() {
-        Some(1) => {}
-        Some(2) => {
-            let err = ErrorHeader::deserialize(&hdr_bytes[1..]).unwrap();
-            panic!("v1 download failed: {} - {}", err.code, err.message);
-        }
-        Some(other) => panic!("v1 download failed: unexpected response tag {}", other),
-        None => panic!("v1 download failed: empty response frame"),
-    }
-
-    let response = DownloadResponse::deserialize(&hdr_bytes[1..]).unwrap();
-
-    let file_size = response.file_size;
-    let file_hash = response.file_hash;
-
-    let mut received = Vec::with_capacity(file_size as usize);
-    let mut chunk = vec![0u8; 32 * 1024];
-    while received.len() < file_size as usize {
-        let to_read = std::cmp::min(chunk.len(), file_size as usize - received.len());
-        let n = stream.read(&mut chunk[..to_read]).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        received.extend_from_slice(&chunk[..n]);
-    }
-
-    assert_eq!(
-        received.len() as u64,
-        file_size,
-        "v1 downloaded file size mismatch"
-    );
-
-    let mut hasher = Sha256::new();
-    hasher.update(&received);
-    let received_hash = hex::encode(hasher.finalize()).to_string();
-    assert_eq!(file_hash, received_hash, "v1 downloaded file hash mismatch");
-
-    received
+    map.write(&map_path).await.unwrap();
 }
 
 async fn snapshot_tracker() -> (usize, usize, f64) {
@@ -257,13 +168,16 @@ async fn test_concurrency_v1() {
     }
 
     let _guard = share_lock().lock().await;
+    let _tmp_home = setup_temp_home();
 
-    cleanup_storage().await;
+    let server_pub = prepare_server_keys().await;
 
     let port = free_port();
     let server = start_server_v1(port).await;
 
-    // Reset tracker after server is ready (probe connection done) to measure only client connections
+    prepare_server_map(port, &server_pub).await;
+
+    // Reset tracker to measure only client connections
     {
         let mut lock = SERVER_TRACKER.write().await;
         lock.total_uploaded = 0;
@@ -275,29 +189,57 @@ async fn test_concurrency_v1() {
 
     let num_clients = 32;
     let mut tasks = JoinSet::new();
+    let task_root = tempfile::tempdir().unwrap();
 
     for i in 0..num_clients {
         let mut payload = vec![0u8; TEST_FILE_SIZE];
+        rand::rng().fill_bytes(&mut payload);
+
+        let task_dir = task_root.path().join(format!("t{}", i));
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+
+        let file_path = task_dir.join(format!("src_{}.bin", i));
+        tokio::fs::write(&file_path, &payload).await.unwrap();
+
         tasks.spawn(async move {
-            rand::rng().fill_bytes(&mut payload);
-            let filename = format!("v1_test_file_{}.bin", i);
-            let file_key = format!("v1_key_{}", i);
+            let (client_key, _) = generate_ed25519_keypair().unwrap();
+            let mut pool = vec![0u8; 4 * 1024 * 1024];
+            let uuid = Uuid::new_v4().simple().to_string();
+            let file_key = format!("key_{}", i);
 
-            let file_id = v1_client_upload(port, &payload, &filename, &file_key).await;
-            let downloaded = v1_client_download(port, &file_id, &file_key).await;
+            let file_id = upload_client(
+                file_path.clone(),
+                file_key.clone(),
+                &uuid,
+                "127.0.0.1",
+                port,
+                client_key.clone(),
+                &mut pool,
+            )
+            .await
+            .expect("Upload failed");
 
-            assert_eq!(
-                payload, downloaded,
-                "v1 client {}: downloaded data does not match uploaded data",
-                i
-            );
+            let out_dir = task_dir.join("downloads");
+            tokio::fs::create_dir_all(&out_dir).await.unwrap();
+            let out_path = download_client(
+                &file_id,
+                file_key,
+                Some(out_dir),
+                "127.0.0.1",
+                port,
+                client_key,
+                &mut pool,
+            )
+            .await
+            .expect("Download failed");
+
+            let downloaded = tokio::fs::read(&out_path).await.unwrap();
+            assert_eq!(payload, downloaded, "Data mismatch for client {}", i);
         });
     }
 
     while let Some(result) = tasks.join_next().await {
-        result
-            .map_err(|e| panic!("v1 client task failed: {}", e))
-            .unwrap();
+        result.map_err(|e| panic!("Task failed: {}", e)).unwrap();
     }
 
     let expected_bw = 2.0 * num_clients as f64 * TEST_FILE_SIZE as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -305,15 +247,12 @@ async fn test_concurrency_v1() {
         base_up,
         base_down,
         base_bw,
-        num_clients, // upload increases by 1 for each
-        num_clients, // download increases by 1 for each
+        num_clients,
+        num_clients,
         expected_bw,
         "v1",
     )
     .await;
 
     stop_server(server).await;
-    cleanup_storage().await;
 }
-
-// TODO: Protocol v2 test here when its done
