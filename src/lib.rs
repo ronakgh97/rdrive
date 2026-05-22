@@ -4,6 +4,7 @@ use anyhow::Result;
 use chrono::Local;
 use colored::Colorize;
 use dashmap::DashMap;
+use hex::decode;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
@@ -237,7 +238,7 @@ impl Catalog {
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct AuthServerMap {
-    /// Map -> (Host/IP, pubkey_pem)
+    /// Map -> (Host/IP, pubkey_hex)
     pub server_map: HashMap<SocketAddr, String>,
 }
 
@@ -281,7 +282,7 @@ pub static ENABLE_CLIENT_WHITELIST: LazyLock<bool> = LazyLock::new(|| {
 // TODO: pem is not needed, for internal ops
 //  use bytes to form key
 
-pub static SERVER_PUB_KEY_PEM: LazyLock<String> = LazyLock::new(|| {
+pub static SERVER_PUB_KEY_BYTES: LazyLock<[u8; 32]> = LazyLock::new(|| {
     let pubkey = get_server_key_dir()
         .unwrap_or_else(|e| {
             eprintln!(
@@ -292,8 +293,8 @@ pub static SERVER_PUB_KEY_PEM: LazyLock<String> = LazyLock::new(|| {
             );
             std::process::exit(1);
         })
-        .join("public.pem");
-    std::fs::read_to_string(pubkey).unwrap_or_else(|e| {
+        .join("public_ed25519.key");
+    let key_hex = std::fs::read_to_string(pubkey).unwrap_or_else(|e| {
         eprintln!(
             "{}",
             format!("Failed to read server public key: {}", e)
@@ -301,10 +302,30 @@ pub static SERVER_PUB_KEY_PEM: LazyLock<String> = LazyLock::new(|| {
                 .bold()
         );
         std::process::exit(1);
-    })
+    });
+    decode(key_hex.trim())
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{}",
+                format!("Failed to decode server public key hex: {}", e)
+                    .red()
+                    .bold()
+            );
+            std::process::exit(1);
+        })
+        .try_into()
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{}",
+                format!("Failed to convert server public key to 32 bytes: {:?}", e)
+                    .red()
+                    .bold()
+            );
+            std::process::exit(1);
+        })
 });
 
-pub static SERVER_PRI_KEY_PEM: LazyLock<String> = LazyLock::new(|| {
+pub static SERVER_PRI_KEY_BYTES: LazyLock<[u8; 32]> = LazyLock::new(|| {
     let prikey = get_server_key_dir()
         .unwrap_or_else(|e| {
             eprintln!(
@@ -315,8 +336,8 @@ pub static SERVER_PRI_KEY_PEM: LazyLock<String> = LazyLock::new(|| {
             );
             std::process::exit(1);
         })
-        .join("private.pem");
-    std::fs::read_to_string(prikey).unwrap_or_else(|e| {
+        .join("private_ed25519.key");
+    let key_hex = std::fs::read_to_string(prikey).unwrap_or_else(|e| {
         eprintln!(
             "{}",
             format!("Failed to read server private key: {}", e)
@@ -324,7 +345,27 @@ pub static SERVER_PRI_KEY_PEM: LazyLock<String> = LazyLock::new(|| {
                 .bold()
         );
         std::process::exit(1);
-    })
+    });
+    decode(key_hex.trim())
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{}",
+                format!("Failed to decode server private key hex: {}", e)
+                    .red()
+                    .bold()
+            );
+            std::process::exit(1);
+        })
+        .try_into()
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{}",
+                format!("Failed to convert server private key to 32 bytes: {:?}", e)
+                    .red()
+                    .bold()
+            );
+            std::process::exit(1);
+        })
 });
 
 pub static MAX_CONNECTIONS: LazyLock<usize> = LazyLock::new(|| {
@@ -333,8 +374,8 @@ pub static MAX_CONNECTIONS: LazyLock<usize> = LazyLock::new(|| {
         .and_then(|s| s.parse().ok())
         .unwrap_or(256) // default to 256 connections
 });
-pub static MAX_FILE_SIZE: LazyLock<u64> = LazyLock::new(|| {
-    std::env::var("MAX_FILE_SIZE")
+pub static MAX_FILE_SIZE_GB: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var("MAX_FILE_SIZE_GB")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8 * 1024 * 1024 * 1024) // 8 GB default
@@ -426,7 +467,7 @@ pub fn ascii_art() {
 
     println!(
         "{}",
-        "rdrive; an object storage server written in Rust"
+        "rdrive; an SIMPLE & SECURE object storage server written in Rust"
             .bright_blue()
             .bold()
     );
@@ -435,6 +476,6 @@ pub fn ascii_art() {
 
     println!(
         "🔗 Github: {}",
-        "https://github.com/ronakgh97/rstorage".magenta().bold()
+        "https://github.com/ronakgh97/r-drive".magenta().bold()
     );
 }

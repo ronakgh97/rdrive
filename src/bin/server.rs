@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use hex::encode;
 use r_drive::args::{ServerArgs, ServerCommands};
 use r_drive::crypto::generate_ed25519_keypair;
@@ -22,8 +20,10 @@ async fn main() -> Result<()> {
             "v1" => {
                 let key_path = get_server_key_dir()?;
 
-                let (pri_key, pub_key) =
-                    (key_path.join("private.pem"), key_path.join("public.pem"));
+                let (pri_key, pub_key) = (
+                    key_path.join("private_ed25519.key"),
+                    key_path.join("public_ed25519.key"),
+                );
 
                 match (pri_key.exists(), pub_key.exists()) {
                     (true, true) => {
@@ -33,15 +33,14 @@ async fn main() -> Result<()> {
                                 .cyan()
                         );
                     }
-                    // TODO: hash cant be reproduce
                     (false, false) | (true, false) | (false, true) => {
                         let (new_pri, new_pub) = generate_ed25519_keypair()?;
-                        let new_pri_pem = new_pri.to_pkcs8_pem(LineEnding::LF)?;
-                        let new_pub_pem = new_pub.to_public_key_pem(LineEnding::LF)?;
+                        let new_pri_hex = encode(new_pri.as_bytes());
+                        let new_pub_hex = encode(new_pub.to_bytes());
 
                         tokio::fs::create_dir_all(&key_path).await?;
-                        tokio::fs::write(&pri_key, &new_pri_pem).await?;
-                        tokio::fs::write(&pub_key, &new_pub_pem).await?;
+                        tokio::fs::write(&pri_key, &new_pri_hex.trim()).await?;
+                        tokio::fs::write(&pub_key, &new_pub_hex.trim()).await?;
                         println!(
                             "[Server FP] {}",
                             encode(Sha256::digest(tokio::fs::read_to_string(&pub_key).await?))

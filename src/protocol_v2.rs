@@ -1,5 +1,5 @@
 // use crate::{
-//     MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, READ_TIMEOUT,
+//     MAX_FILE_SIZE_GB, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, READ_TIMEOUT,
 //     SERVER_TRACKER, START_TIME, WRITE_TIMEOUT, debug, error, file_hasher_async, info,
 //     parse_status_line, trace, try_get_uptime_hrs, warn,
 // };
@@ -224,7 +224,7 @@
 //         .and_then(|v| v.parse().ok())
 //         .ok_or_else(|| anyhow::anyhow!("Missing or invalid file-size header"))?;
 //
-//     let file_size_limit = *MAX_FILE_SIZE;
+//     let file_size_limit = *MAX_FILE_SIZE_GB;
 //
 //     if file_size > file_size_limit {
 //         warn!(

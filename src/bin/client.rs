@@ -1,9 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use colored::Colorize;
-use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use hex::{decode, encode};
 use r_drive::args::{ClientArgs, ClientCommands};
 use r_drive::crypto::generate_ed25519_keypair;
 use r_drive::protocol_v1::{
@@ -11,15 +10,19 @@ use r_drive::protocol_v1::{
     upload_client as upload_file_v1,
 };
 use r_drive::{Catalog, ascii_art, get_catalog_path, get_user_key_dir};
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256};
 use std::io;
 use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = ClientArgs::parse();
-
     let mut alloc_mem = vec![0u8; 14 * 1024 * 1024];
+
+    let user_path = get_user_key_dir()?;
+    let private_key_path = user_path.join("private_ed25519.key");
+    let public_key_path = user_path.join("public_ed25519.key");
+
     match args.command {
         // TODO: Somehow find a way to recover keys
         Some(ClientCommands::Key {
@@ -28,10 +31,6 @@ async fn main() -> Result<()> {
             rot,
             auth,
         }) => {
-            let user_path = get_user_key_dir()?;
-            let private_key_path = user_path.join("private_key.pem");
-            let public_key_path = user_path.join("public_key.pem");
-
             let existing_keys = match (private_key_path.exists(), public_key_path.exists()) {
                 (true, true) => Some((
                     tokio::fs::read_to_string(&private_key_path).await?,
@@ -42,22 +41,27 @@ async fn main() -> Result<()> {
 
             // this oneshot, we don't want to lockout client
             if rot {
-                let (old_pri_pem, old_pub_pem) =
-                    existing_keys.context("No existing keys. Cannot rotate.")?;
+                let (old_pri_hex, old_pub_hex) =
+                    existing_keys.context("No existing keys, cannot rotate.")?;
 
-                let signing_key = SigningKey::from_pkcs8_pem(&old_pri_pem)
-                    .context("Bad private key, cannot rotate")?;
-                let old_public_key = VerifyingKey::from_public_key_pem(&old_pub_pem)
-                    .context("Bad public key, cannot rotate")?;
+                let old_pri_key_bytes: [u8; 32] = decode(old_pri_hex.trim())?
+                    .try_into()
+                    .map_err(|e| anyhow!("Invalid old private key length: {:?}", e))?;
+                let old_pub_key_bytes: [u8; 32] = decode(old_pub_hex.trim())?
+                    .try_into()
+                    .map_err(|e| anyhow!("Invalid old public key length: {:?}", e))?;
+
+                let signing_key = SigningKey::from_bytes(&old_pri_key_bytes);
+                let old_public_key = VerifyingKey::from_bytes(&old_pub_key_bytes)?;
 
                 let (new_pri, new_pub) = generate_ed25519_keypair()?;
-                let new_pri_pem = new_pri.to_pkcs8_pem(LineEnding::LF)?;
-                let new_pub_pem = new_pub.to_public_key_pem(LineEnding::LF)?;
+                let new_pri_hex = encode(new_pri.to_bytes());
+                let new_pub_hex = encode(new_pub.to_bytes());
 
                 println!(
-                    "Preview Public key (PEM SHA)\n{} -> {}",
-                    hex::encode(Sha512::digest(&old_pub_pem)).yellow(),
-                    hex::encode(Sha512::digest(&new_pub_pem)).green()
+                    "Preview change (HEX SHA)\n> {}\n> {}",
+                    encode(Sha256::digest(&old_pub_hex)).yellow(),
+                    encode(Sha256::digest(&new_pub_hex)).green()
                 );
 
                 // Try sync with server BEFORE writing to disk!!!
@@ -71,46 +75,51 @@ async fn main() -> Result<()> {
                 )
                 .await?;
 
+                // save the hex to .key
                 println!("Key rotated/synced successfully");
                 tokio::fs::create_dir_all(&user_path).await?;
-                tokio::fs::write(&private_key_path, &new_pri_pem).await?;
-                tokio::fs::write(&public_key_path, &new_pub_pem).await?;
+                tokio::fs::write(&private_key_path, &new_pri_hex).await?;
+                tokio::fs::write(&public_key_path, &new_pub_hex).await?;
 
                 return Ok(());
             }
 
             let (signing_key, verifying_key) = match existing_keys {
-                Some((pri_pem, pub_pem)) => {
+                Some((pri_hex, pub_hex)) => {
                     println!("Found existing keypair");
 
-                    let signing_key = SigningKey::from_pkcs8_pem(&pri_pem)
-                        .context("Bad private key, cannot authenticate")?;
-                    let verifying_key = VerifyingKey::from_public_key_pem(&pub_pem)
-                        .context("Bad public key, cannot authenticate")?;
+                    let old_pri_key_bytes: [u8; 32] = decode(pri_hex.trim())?
+                        .try_into()
+                        .map_err(|e| anyhow!("Invalid old private key length: {:?}", e))?;
+                    let old_pub_key_bytes: [u8; 32] = decode(pub_hex.trim())?
+                        .try_into()
+                        .map_err(|e| anyhow!("Invalid old public key length: {:?}", e))?;
+
+                    let signing_key = SigningKey::from_bytes(&old_pri_key_bytes);
+                    let verifying_key = VerifyingKey::from_bytes(&old_pub_key_bytes)?;
 
                     (signing_key, verifying_key)
                 }
 
                 None => {
                     let (prikey, pubkey) = generate_ed25519_keypair()?;
-                    let pri_pem = prikey.to_pkcs8_pem(LineEnding::LF)?.to_string();
-                    let pub_pem = pubkey.to_public_key_pem(LineEnding::LF)?;
+
+                    let new_pri_hex = encode(prikey.to_bytes());
+                    let new_pub_hex = encode(pubkey.to_bytes());
 
                     tokio::fs::create_dir_all(&user_path).await?;
-                    tokio::fs::write(&private_key_path, &pri_pem).await?;
-                    tokio::fs::write(&public_key_path, &pub_pem).await?;
+                    tokio::fs::write(&private_key_path, &new_pri_hex).await?;
+                    tokio::fs::write(&public_key_path, &new_pub_hex).await?;
 
                     println!("Generated ed25519 keypair.");
-
                     (prikey, pubkey)
                 }
             };
 
-            // TODO: hash cant be reproduce
-            let pub_key_pem = verifying_key.to_public_key_pem(LineEnding::LF)?;
+            let pub_key_hex = encode(verifying_key.to_bytes());
             println!(
-                "Public key (PEM SHA)\n{}",
-                hex::encode(Sha512::digest(&pub_key_pem)).green()
+                "Public key (HEX SHA): {}",
+                encode(Sha256::digest(&pub_key_hex)).green()
             );
 
             if auth {
@@ -126,7 +135,7 @@ async fn main() -> Result<()> {
             } else {
                 // TODO: do a little user prompt here after showing key
                 println!(
-                    "Make sure to mkdir (whitelist) your SHA512 public key on the server ~/.rdrive/authorized_keys/"
+                    "Make sure to mkdir (whitelist) your SHA256 public key on the server ~/.rdrive/authorized_keys/"
                 );
             }
         }
@@ -137,18 +146,16 @@ async fn main() -> Result<()> {
             protocol,
             file_key,
         }) => {
-            let user_path = get_user_key_dir()?;
-            let private_key_path = user_path.join("private_key.pem");
-            let public_key_path = user_path.join("public_key.pem");
-
-            if !private_key_path.exists() && public_key_path.exists() {
-                eprintln!("Public key exists but private key is missing, cannot push.");
+            if !private_key_path.exists() && !public_key_path.exists() {
+                eprintln!("No keys found, please run `rdrive key <args?>`.");
                 std::process::exit(1);
             }
 
-            let signing_key =
-                SigningKey::from_pkcs8_pem(&tokio::fs::read_to_string(&private_key_path).await?)
-                    .context("Bad private key, cannot push")?;
+            let key_hex: [u8; 32] =
+                decode(tokio::fs::read_to_string(&private_key_path).await?.trim())?
+                    .try_into()
+                    .map_err(|e| anyhow!("Invalid private key length: {:?}", e))?;
+            let signing_key = SigningKey::from_bytes(&key_hex);
 
             if !file.exists() {
                 eprintln!("File not found: {}", file.display());
@@ -247,18 +254,16 @@ async fn main() -> Result<()> {
             file_key,
             file_id,
         }) => {
-            let user_path = get_user_key_dir()?;
-            let private_key_path = user_path.join("private_key.pem");
-            let public_key_path = user_path.join("public_key.pem");
-
             if !private_key_path.exists() && public_key_path.exists() {
                 eprintln!("Public key exists but private key is missing, cannot pull.");
                 std::process::exit(1);
             }
 
-            let signing_key =
-                SigningKey::from_pkcs8_pem(&tokio::fs::read_to_string(&private_key_path).await?)
-                    .context("Bad private key, cannot pull")?;
+            let key_hex: [u8; 32] =
+                decode(tokio::fs::read_to_string(&private_key_path).await?.trim())?
+                    .try_into()
+                    .map_err(|e| anyhow!("Invalid private key length: {:?}", e))?;
+            let signing_key = SigningKey::from_bytes(&key_hex);
 
             let (file_id, file_key) = if let (Some(id), Some(key)) = (file_id, file_key) {
                 (id, key)
@@ -359,9 +364,11 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
 
-            let signing_key =
-                SigningKey::from_pkcs8_pem(&tokio::fs::read_to_string(&private_key_path).await?)
-                    .context("Bad private key, cannot status")?;
+            let key_hex: [u8; 32] =
+                decode(tokio::fs::read_to_string(&private_key_path).await?.trim())?
+                    .try_into()
+                    .map_err(|e| anyhow!("Invalid private key length: {:?}", e))?;
+            let signing_key = SigningKey::from_bytes(&key_hex);
 
             match protocol.as_str() {
                 "v1" => {

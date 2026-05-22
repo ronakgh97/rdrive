@@ -33,26 +33,34 @@ docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name
 
 ```shell
 # ssh into server or go inside container, 
-# and create ~/.rdrive/authorized_keys/<sha512 public key pem> dir for whitelisting client 
+# and create ~/.rdrive/authorized_keys/<sha256 public key_bytes hex> dir for whitelisting client 
 # or just ENABLE_CLIENT_WHITELIST false
 
-rdrive key # gen ed25519 keypair, does not overwrite until you do `-r` or `-a` for first init
-Generated ed25519 keypair.
-Public key (HEX):
-2d2d2d2d2d424547494e205055424c4943204b45592d2d2d2d2d0a4d436f77425159444b325677417945412f6b706e4e395748336c574a4d516457716d7448764f433363765a693344634154366b2b745a49686f2f733d0a2d2d2d2d2d454e44205055424c4943204b45592d2d2d2d2d0a
-Make sure to whitelist your HEX public key on the server, If not already auth
+rdrive key # gen/log ed25519 pubkey, does NOT overwrite until you do `-r` if auth already or `-a` for first init
+Found existing keypair
+Public key (HEX SHA): d135e985fb19f343704bed31a3af6a7db91fee83bcfaadfb316ddf7cfa331635
+Make sure to mkdir (whitelist) your SHA256 public key on the server ~/.rdrive/authorized_keys/
 
-mkdir ~/.rdrive/authorized_keys/2d2d2d2d2d424547494e205055424c4943204b45592d2d2d2d2d0a4d436f77425159444b325677417945415447544c6b4a715432795039536775434268646c6b567966793345743248675850334d67316d644c6b75493d0a2d2d2d2d2d454e44205055424c4943204b45592d2d2d2d2d0a/
+rdrive key -a
+Found existing keypair
+Public key (HEX SHA): d135e985fb19f343704bed31a3af6a7db91fee83bcfaadfb316ddf7cfa331635
+Unknown Server IP: 127.0.0.1:3000
+Server key FP: da480ff868f9e4ce9110abf289399131e246097bafb69006474370b7208bada8
+Trust this server? [y/N]: y
+Error: Auth failed: 403 - Client not authorized, please contact the admin, provider or ssh into the server
+
+# whitelist the client public key on the server, then auth again
+mkdir ~/.rdrive/authorized_keys\c8a5a04dba635ab9b60cc2ff1f19717e5b9c683bfeeacdfca73e5c23c76cf917
 
 rdrive key -a # -a for init auth
 Found existing keypair
-Public key (HEX):
-2d2d2d2d2d424547494e205055424c4943204b45592d2d2d2d2d0a4d436f77425159444b325677417945412f6b706e4e395748336c574a4d516457716d7448764f433363765a693344634154366b2b745a49686f2f733d0a2d2d2d2d2d454e44205055424c4943204b45592d2d2d2d2d0a
+Public key (HEX SHA): d135e985fb19f343704bed31a3af6a7db91fee83bcfaadfb316ddf7cfa331635
 Auth successfully
 
 rdrive key -r # -r for rotate/sync key
-Preview Public key (HEX):
-2d2d2d2d2d424547494e205055424c4943204b45592d2d2d2d2d0a4d436f77425159444b325677417945415447544c6b4a715432795039536775434268646c6b567966793345743248675850334d67316d644c6b75493d0a2d2d2d2d2d454e44205055424c4943204b45592d2d2d2d2d0a                    
+Preview change (HEX SHA)
+> d135e985fb19f343704bed31a3af6a7db91fee83bcfaadfb316ddf7cfa331635
+> dba1253bbe0f28705afdf6357aa55c44aaece05f3a56a75090a75cf5911a1fbe # does not SAVE, if sync fails
 Auth successfully
 Key rotated/synced successfully
 ```
@@ -101,21 +109,21 @@ test layer::test_layering ... ok
 ```shell
 .rdrive/
   authorized_keys/ # white_list & user key-space dir
-    <sha512 public key1 PEM>/
+    <sha256 public key1_bytes HEX>/ # im choosing hex over any key format for less friction and errors
       rot.history # for key rotation history, use case?
-    <sha512 public key2 PEM>/
+    <sha256 public key2_bytes HEX>/
       rot.history
     ...
     
   storage/
-    <sha256 public key1>/
+    <sha512 public key1 HEX>/ # user-space dir
       <sha256 file_key>/
         <sha256 file-id>/ # CAS/Layering and all that stuff
           e40164c21c10e...
           b4661b0652c66...
           ...
           metadata.json
-    <sha256 public key1>/
+    <sha512 public key2 HEX>/
       <sha256 file_key>/
         <sha256 file-id>/
           346104ebf6a9w...
@@ -125,8 +133,8 @@ test layer::test_layering ... ok
     ...
             
   server/ # keep them here for now
-    private.pem
-    public.pem
+    private_ed25519.key
+    public_ed25519.key
 ```
 
 > NOTE: This can be improved by introducing sharding & stuffs
@@ -142,7 +150,7 @@ TODO
 - Fix and improve the buffering and streaming for large files (diff hashing, chunking, chopping, etc.)
 - More protocol features like file listing, metadata retrieval, more commands etc. [DONE]
 - Graceful shutdown and cleanup
-- Little bit client polish, prefer 256 512 Hash over of raw hex OR PEM usage, where can
+- Little bit client polish, prefer 256 512 Hash over of raw hex OR PEM usage, where can [DONE]
 - Protocol v2 meant to be use UDP, but skill issues...
 - Encrypted share feature between clients (stateless relay server) without sharing the master key, maybe using some kind
   of temporary keys or

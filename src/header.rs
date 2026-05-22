@@ -1,4 +1,4 @@
-use crate::{MAX_FILE_SIZE, get_storage_dir};
+use crate::{MAX_FILE_SIZE_GB, get_storage_dir};
 use anyhow::Result;
 use postcard::from_bytes;
 use postcard::to_allocvec;
@@ -80,7 +80,7 @@ impl EchoDebugHeader {
 
 use ed25519_dalek::{Verifier, VerifyingKey};
 use hex::encode;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha512};
 
 #[derive(Serialize, Deserialize)]
 pub struct NewKeyHeader {
@@ -112,21 +112,22 @@ pub struct RotateKeyHeader {
 }
 
 impl RotateKeyHeader {
-    /// Validates the signature and checks if the old public key is registered. Returns the user path if valid.
-    pub async fn validate(&self, nonce: &[u8]) -> Result<PathBuf> {
+    /// Validates the signature and checks if the old public key is registered. Returns the user path & hash512 if valid
+    pub async fn validate(&self, nonce: &[u8]) -> Result<(PathBuf, String)> {
         let old_pub_key = VerifyingKey::from_bytes(&self.old_public_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to construct old public key from bytes: {}", e))?;
 
-        let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
-        let old_user_path = get_storage_dir().await?.join(old_pub_key_hash);
+        let old_pub_key_hash = encode(Sha512::digest(old_pub_key.as_bytes()));
+        let old_user_path = get_storage_dir().await?.join(&old_pub_key_hash);
 
         if !old_user_path.exists() {
             return Err(anyhow::anyhow!("User not registered, not found"));
         }
 
         validate_signature(&self.old_public_bytes, &self.signature, nonce)?;
-        Ok(old_user_path)
+        Ok((old_user_path, old_pub_key_hash))
     }
+
     pub fn serialize(&self) -> Result<Vec<u8>> {
         to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
     }
@@ -186,10 +187,10 @@ impl UploadHeader {
         if self.file_name.is_empty() {
             return Err(anyhow::anyhow!("File name cannot be empty"));
         }
-        if self.file_size < 1024 * 1024 || self.file_size > *MAX_FILE_SIZE {
+        if self.file_size < 1024 * 1024 || self.file_size > *MAX_FILE_SIZE_GB {
             return Err(anyhow::anyhow!(
-                "File size must be between 1MB and {} MB",
-                *(MAX_FILE_SIZE) / 1024 * 1024
+                "File size must be between 1MB and {} GB",
+                *MAX_FILE_SIZE_GB
             ));
         }
         if self.file_hash.is_empty() {

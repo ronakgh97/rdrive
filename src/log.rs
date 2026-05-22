@@ -36,7 +36,7 @@ fn should_log(level: Level) -> bool {
     level >= *LOG_LEVEL
 }
 
-#[inline]
+#[inline(always)]
 pub fn log(level: Level, msg: ColoredString) {
     if !should_log(level) {
         return;
