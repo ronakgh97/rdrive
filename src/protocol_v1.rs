@@ -14,16 +14,17 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
-use ed25519_dalek::ed25519::signature::AsyncVerifier;
+use ed25519_dalek::ed25519::signature::{AsyncSigner, AsyncVerifier};
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
 use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePublicKey};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hex::encode;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::Rng;
 use serde::Serialize;
 use sha2::{Digest, Sha256, Sha512};
 use std::cmp::min;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -32,6 +33,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
+use x25519_dalek::PublicKey;
 
 /// Entry-point for TCP server using the v1 protocol
 pub async fn start_tcp_server(port: u16, storage_path: Arc<PathBuf>) -> Result<()> {
@@ -474,11 +476,13 @@ async fn send_status<W: AsyncWriteExt + Unpin>(
 }
 
 /// Perform the initial handshake with the client, exchange hellos and nonce challenge
-/// returning  session key (unsalted) and client ed22519 key
+/// returning session key (unsalted) and client ed22519 key
 async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
     writer: &mut W,
 ) -> Result<([u8; 32], [u8; 32])> {
+    let (x25519_pri, x25519_pub) = generate_x25519_keypair()?;
+
     // read client_hello
     let client_hello = {
         let mut client_hello_data = vec![];
@@ -486,26 +490,13 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         ClientHello::deserialize(&client_hello_data)?
     };
 
-    let (x25519_pri, x25519_pub) = generate_x25519_keypair()?;
-
     // prepare server_hello
     let server_hello = {
         let mut nonce = [0u8; 32];
         rand::rng().fill_bytes(&mut nonce);
 
-        let ed22519_pub = VerifyingKey::from_public_key_pem(&SERVER_PUB_KEY_PEM).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to construct server Ed25519 public key from PEM: {}",
-                e
-            )
-        })?;
-
-        let ed22519_pri = SigningKey::from_pkcs8_pem(&SERVER_PRI_KEY_PEM).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to construct server Ed25519 private key from PEM: {}",
-                e
-            )
-        })?;
+        let ed22519_pri = SigningKey::from_pkcs8_pem(&SERVER_PRI_KEY_PEM)?;
+        let ed22519_pub = VerifyingKey::from_public_key_pem(&SERVER_PUB_KEY_PEM)?;
 
         // construct data to be signed
         let mut data_signed = [9u8; 128];
@@ -514,7 +505,6 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         data_signed[64..96].copy_from_slice(&client_hello.x22519_key);
         data_signed[96..128].copy_from_slice(&x25519_pub.to_bytes());
 
-        use ed25519_dalek::ed25519::signature::AsyncSigner;
         let signature = ed22519_pri.sign_async(&data_signed).await?;
 
         ServerHello {
@@ -531,9 +521,6 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         write_raw_frame(writer, &server_hello.serialize()?),
     )
     .await??;
-
-    // explicit flush
-    writer.flush().await?;
 
     //--- client will auth check the server
 
@@ -567,14 +554,8 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     verify_key
         .verify_async(&nonce, &signature)
         .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to verify client's signature during handshake: {}",
-                e
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!("Failed to verify client's signature: {}", e))?;
 
-    use x25519_dalek::PublicKey;
     let client_ephemeral = &PublicKey::from(client_hello.x22519_key);
     Ok((
         x25519_pri.diffie_hellman(client_ephemeral).to_bytes(),
@@ -599,11 +580,13 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         nonce = Sha256::digest(nonce).into();
         nonce = Sha256::digest(nonce).into();
     }
+
     // TODO; we are sending nonce challenge regardless of authenticity of client, hmm?
     //  will this need x25519 encryption? (app level or network level?),
     //  I'm trying to come up with shared header flow, to reduce brain damage
     // send nonce challenge to client for signature verification, FIRST
-    // hashing for good sake, 32 bytes cute
+    // hashing for good sake, 32 bytes nice
+
     timeout(
         WRITE_TIMEOUT,
         write_encrypt_frame(writer, &nonce, session_key, mem_pool),
@@ -625,23 +608,28 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 let pub_key_pem = pub_key.to_public_key_pem(LineEnding::LF).map_err(|e| {
                     anyhow::anyhow!("Failed to convert public key to PEM format: {}", e)
                 })?;
-                // hex because we want human-readable
-                let pub_key_hex = encode(pub_key_pem.as_bytes());
 
-                let auth_keys_path = get_authorized_client_dir().await?.join(&pub_key_hex);
+                // NOTE: auth path is sha512 fp of pem and user key path is auth key path itself
+                // storage space is sha256 of client raw bytes NOT PEM
+                let pub_key_hash512 = encode(Sha512::digest(pub_key_pem.as_bytes()));
+                let user_key_path = get_authorized_client_dir().await?.join(&pub_key_hash512);
 
-                info!("Auth attempt with new key: {}", &pub_key_hex[..16].dimmed());
+                info!(
+                    "Auth attempt with new key: {}",
+                    &pub_key_hash512[..16].dimmed()
+                );
 
-                // check if client is allowed (if ENABLE_CLIENT_WHITELIST, false) and if auth key path is valid
+                // check if client is allowed (if ENABLE_CLIENT_WHITELIST, false)
+                // and if auth key path is valid, but DON'T CREATE ANYTHING
                 match (
                     *ENABLE_CLIENT_WHITELIST,
-                    auth_keys_path.exists(),
-                    auth_keys_path.is_dir(),
+                    user_key_path.exists(),
+                    user_key_path.is_dir(),
                 ) {
                     (false, false, _) => {
                         warn!(
                             "Client with key: {} is not authorized, rejecting client storage space",
-                            &pub_key_hex[..18]
+                            &pub_key_hash512[..32]
                         );
                         send_failed(
                             writer,
@@ -660,7 +648,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                     (_, true, false) => {
                         error!(
                             "Auth key must be a directory for key: {}, skipping user storage space creation",
-                            &pub_key_hex[..18]
+                            &pub_key_hash512[..32]
                         );
                         send_failed(
                             writer,
@@ -677,11 +665,10 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
                     _ => {}
                 }
-                // hash collision free
-                let pub_key_hash = encode(Sha256::digest(pub_key.as_bytes()));
-                let user_storage_dir = get_storage_dir().await?.join(pub_key_hash);
-                let user_key_path = auth_keys_path.join(encode(pub_key_pem.as_bytes()));
 
+                // check or create user storage space
+                let pub_key_hash256 = encode(Sha256::digest(pub_key.as_bytes()));
+                let user_storage_dir = get_storage_dir().await?.join(&pub_key_hash256);
                 // check and return from here, no needed
                 if user_storage_dir.exists() && user_key_path.exists() {
                     send_warn(
@@ -698,7 +685,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                     return Ok(());
                 }
 
-                // auto white-list if ALLOW_CLIENT false & dir not exists already
+                // auto white-list if ALLOW_CLIENT false & create auth user space dir OTHERWISE
                 match (
                     tokio::fs::create_dir_all(&user_key_path).await,
                     tokio::fs::create_dir_all(&user_storage_dir).await,
@@ -706,7 +693,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                     (Err(_), Err(_)) | (Err(_), Ok(_)) | (Ok(_), Err(_)) => {
                         error!(
                             "Failed to create auth key or user space for key: {}, returning back",
-                            &pub_key_hex[..18]
+                            &pub_key_hash512[..32]
                         );
                         send_failed(
                             writer,
@@ -746,7 +733,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     } else if flag == 2 {
         let key_header = RotateKeyHeader::deserialize(header_bytes)?;
         match key_header.validate(&nonce).await {
-            Ok(user_path) => {
+            Ok(old_user_path) => {
                 let new_pub_key =
                     VerifyingKey::from_bytes(&key_header.new_public_bytes).map_err(|e| {
                         anyhow::anyhow!("Failed to construct new public key from bytes: {}", e)
@@ -765,36 +752,34 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                         anyhow::anyhow!("Failed to convert old public key to PEM format: {}", e)
                     })?;
 
-                let new_pub_key_hex = encode(new_pub_key_pem.as_bytes());
-                let old_pub_key_hex = encode(old_pub_key_pem.as_bytes());
+                let new_pub_key_hash = encode(Sha512::digest(new_pub_key.as_bytes()));
+                let old_pub_key_hash = encode(Sha512::digest(old_pub_key.as_bytes()));
 
                 info!(
                     "Rotate key attempt: {} -> {}",
-                    &new_pub_key_hex[..16].dimmed(),
-                    &old_pub_key_hex[..16].dimmed()
+                    &old_pub_key_hash[..32].dimmed(),
+                    &new_pub_key_hash[..32].dimmed()
                 );
 
-                let new_pub_key_hash = encode(Sha256::digest(new_pub_key.as_bytes()));
-                //let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
-
-                let new_user_path = get_storage_dir().await?.join(new_pub_key_hash);
-                //let user_path = get_storage_path().await?.join(old_pub_key_hash);
-
                 let auth_keys_path = get_authorized_client_dir().await?;
-
+                let new_user_path = get_storage_dir()
+                    .await?
+                    .join(encode(Sha256::digest(new_pub_key.as_bytes())));
                 // hope this does not fail
                 match (
+                    // change key space
                     tokio::fs::rename(
-                        auth_keys_path.join(&old_pub_key_hex),
-                        auth_keys_path.join(&new_pub_key_hex),
+                        auth_keys_path.join(encode(Sha512::digest(old_pub_key_pem.as_bytes()))),
+                        auth_keys_path.join(encode(Sha512::digest(new_pub_key_pem.as_bytes()))),
                     )
                     .await,
-                    tokio::fs::rename(&user_path, &new_user_path).await,
+                    // change user space
+                    tokio::fs::rename(&old_user_path, &new_user_path).await,
                 ) {
                     (Err(_), Err(_)) | (Err(_), Ok(_)) | (Ok(_), Err(_)) => {
                         error!(
                             "Failed to rotate old keys for: {}, returning back",
-                            &old_pub_key_hex
+                            &old_pub_key_hash
                         );
                         send_failed(
                             writer,
@@ -886,12 +871,11 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     // ~/<base_dir>/client_key_hash/file_key_hash/file_id_hash
 
-    let user_space_dir = get_storage_dir().await?.join(client_key_hash);
-    let dir_path = storage_path.join(&user_space_dir).join(&file_key_hash);
-    let file_path = dir_path.join(format!("{}.file", &file_id_hash));
-    let metadata_path = dir_path.join(format!("{}.meta", &file_id_hash));
+    let user_dir_path = storage_path.join(&client_key_hash).join(&file_key_hash);
+    let file_path = user_dir_path.join(format!("{}.file", &file_id_hash));
+    let metadata_path = user_dir_path.join(format!("{}.meta", &file_id_hash));
 
-    tokio::fs::create_dir_all(&dir_path).await?;
+    tokio::fs::create_dir_all(&user_dir_path).await?;
 
     info!(
         "Start Uploading: {} ({} bytes) - Hash: {}...",
@@ -1016,17 +1000,16 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         }
     };
 
+    let client_key_hash = encode(Sha256::digest(client_key));
     let file_key_hash = encode(Sha256::digest(headers.file_key.as_bytes()));
     let file_id_hash = encode(Sha256::digest(headers.file_id.as_bytes()));
-    let client_key_hash = encode(Sha256::digest(client_key));
 
     // ~/<base_dir>/client_key_hash/file_key_hash/file_id_hash
 
-    let user_space_dir = get_storage_dir().await?.join(client_key_hash);
-    let dir_path = storage_path.join(&user_space_dir).join(&file_key_hash);
+    let user_dir_path = storage_path.join(&client_key_hash).join(&file_key_hash);
 
     // this line SAVE US A LOT OF IO!!!!
-    if !tokio::fs::try_exists(&dir_path).await? {
+    if !tokio::fs::try_exists(&user_dir_path).await? {
         send_failed(
             writer,
             ErrorHeader {
@@ -1040,8 +1023,8 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         return Ok(());
     }
 
-    let file_path = dir_path.join(format!("{}.file", &file_id_hash));
-    let meta_path = dir_path.join(format!("{}.meta", &file_id_hash));
+    let file_path = user_dir_path.join(format!("{}.file", &file_id_hash));
+    let meta_path = user_dir_path.join(format!("{}.meta", &file_id_hash));
 
     // TODO; should be 500?
     if !meta_path.exists() {
@@ -1083,8 +1066,6 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let file_size = metadata.file_size;
     let file_hash = metadata.file_hash;
 
-    let network_elapsed = time_start.elapsed().as_secs_f32();
-
     info!(
         "Downloading: {} ({} bytes) - Hash: {}...",
         &headers.file_id.dimmed(),
@@ -1092,6 +1073,7 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         file_hash[..8].dimmed()
     );
 
+    let network_elapsed = time_start.elapsed().as_secs_f32();
     let header = DownloadResponse {
         file_name,
         file_size,
@@ -1142,14 +1124,12 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-/// Helper function to perform client handshake and return the computed shared secret session key and tcp stream for continue handler,
-/// or error if handshake fails at any step (network error, invalid server response, signature verification failure, or user rejection of untrusted server)
+/// Perform client-side handshake: connect to server, exchange hellos, verify server key, do nonce challenge, return session key and server's ed25519 key for handler use
 async fn client_handshake_helper(
     host: &str,
     port: u16,
     signing_key: &SigningKey,
 ) -> Result<([u8; 32], TcpStream)> {
-    // connect first
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true).ok();
 
@@ -1163,6 +1143,7 @@ async fn client_handshake_helper(
 
     let (x25519_pri, x25519_pub) = generate_x25519_keypair()?;
 
+    // construct client_hello
     let client_hello = {
         let mut nonce = [0u8; 32];
         rand::rng().fill_bytes(&mut nonce);
@@ -1177,34 +1158,34 @@ async fn client_handshake_helper(
 
     // read server Hello
     let server_hello = {
-        let mut buf = vec![];
-        read_raw_data_into(&mut reader, &mut buf).await?; // read server hello
-        ServerHello::deserialize(&buf)?
+        let mut server_hello_data = vec![];
+        read_raw_data_into(&mut reader, &mut server_hello_data).await?; // read server hello
+        ServerHello::deserialize(&server_hello_data)?
     };
 
     // we check server_map, proceed with caller handler or reject
     let mut authorized_server =
         AuthServerMap::read_or_create(&get_authorized_server_map_path()?).await?;
 
-    let server_key = VerifyingKey::from_bytes(&server_hello.ed25519_key)
-        .context("Failed to parse server Ed25519 public key")?;
-    let server_key_pem = server_key
-        .to_public_key_pem(LineEnding::LF)
-        .context("Failed to encode server public key as PEM")?;
+    let server_key = VerifyingKey::from_bytes(&server_hello.ed25519_key)?;
+    let server_key_pem = server_key.to_public_key_pem(LineEnding::LF)?;
+    let server_key_hash_fp = encode(Sha256::digest(server_key_pem.as_bytes()));
 
     // determine trusted key
     let trusted_key =
-        if let Some(existing_server_pem) = authorized_server.server_map.get(&server_ip) {
-            if existing_server_pem != &server_key_pem {
-                println!("WARNING: server key changed for {}", server_ip);
-                println!("Before:\n{}", existing_server_pem);
-                println!("After:\n{}", server_key_pem);
-                print!("Trust new key? [y/N]");
+        if let Some(existing_server_key_pem) = authorized_server.server_map.get(&server_ip) {
+            if existing_server_key_pem != &server_key_pem {
+                println!("WARNING: Server key changed for {}", server_ip);
+                println!(
+                    "Before FP: {}",
+                    encode(Sha256::digest(existing_server_key_pem.as_bytes()))
+                );
+                println!("After FP: {}", server_key_hash_fp);
+                print!("Trust new key? [y/N]: ");
 
+                io::Write::flush(&mut io::stdout())?;
                 let mut input = String::new();
-                std::io::stdin()
-                    .read_line(&mut input)
-                    .context("Failed to read user input")?;
+                io::stdin().read_line(&mut input)?;
 
                 if !input.trim().eq_ignore_ascii_case("y") {
                     stream.shutdown().await?; // instant close, server gets graceful EOF
@@ -1212,26 +1193,28 @@ async fn client_handshake_helper(
                     anyhow::bail!("User rejected rotated server key");
                 }
 
-                // replace stored key
+                // replace & save stored key
                 authorized_server
                     .server_map
                     .insert(server_ip, server_key_pem);
+                authorized_server
+                    .write(&get_authorized_server_map_path()?)
+                    .await?;
 
                 server_key
             } else {
                 // use already trusted stored key
-                VerifyingKey::from_public_key_pem(existing_server_pem)
-                    .context("Stored PEM key is invalid")?
+                VerifyingKey::from_public_key_pem(existing_server_key_pem)
+                    .context("Existing server key is invalid")?
             }
         } else {
-            println!("Unknown server ip: {}", server_ip);
-            println!("Server key:\n{}", server_key_pem);
-            print!("Trust this server? [y/N]");
+            println!("Unknown Server IP: {}", server_ip);
+            println!("Server key FP: {}", server_key_hash_fp);
+            print!("Trust this server? [y/N]: ");
 
+            io::Write::flush(&mut io::stdout())?;
             let mut input = String::new();
-            std::io::stdin()
-                .read_line(&mut input)
-                .context("Failed to read user input")?;
+            io::stdin().read_line(&mut input)?;
 
             if !input.trim().eq_ignore_ascii_case("y") {
                 stream.shutdown().await?; // instant close, server gets graceful EOF
@@ -1239,9 +1222,13 @@ async fn client_handshake_helper(
                 anyhow::bail!("User rejected unknown server");
             }
 
+            // insert & save
             authorized_server
                 .server_map
                 .insert(server_ip, server_key_pem);
+            authorized_server
+                .write(&get_authorized_server_map_path()?)
+                .await?;
 
             server_key
         };
@@ -1257,14 +1244,15 @@ async fn client_handshake_helper(
     let signature = Signature::from_bytes(&server_hello.signature);
 
     trusted_key
-        .verify(&data_signed, &signature)
-        .context("Server signature verification failed")?;
+        .verify_async(&data_signed, &signature)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to verify server's signature: {}", e))?;
 
-    // do nonce challenge here, saves us from doing per cmd
+    // do nonce challenge here, saves us from doing per header handlers
     let mut nonce = vec![0u8; 64];
     read_raw_data_into(&mut reader, &mut nonce).await?; // read nonce challenge
 
-    let signature: [u8; 64] = signing_key.sign(&nonce).to_bytes();
+    let signature: [u8; 64] = signing_key.sign_async(&nonce).await?.to_bytes();
     let pub_key = signing_key.verifying_key().to_bytes();
 
     // format [64][32]
@@ -1277,8 +1265,6 @@ async fn client_handshake_helper(
     writer.flush().await?;
 
     let session_key = {
-        use x25519_dalek::PublicKey;
-
         let shared_key = x25519_pri
             .diffie_hellman(&PublicKey::from(server_hello.x22519_key))
             .to_bytes();
@@ -1286,7 +1272,7 @@ async fn client_handshake_helper(
         let mut key = [1u8; 128];
         key[0..32].copy_from_slice(&shared_key);
         key[64..96].copy_from_slice(&shared_key);
-        Sha256::digest(key).into() // TODO; I HATEEEEE ".into()" SO MUCHHHHHHH
+        Sha256::digest(key).into()
     };
 
     Ok((session_key, stream))

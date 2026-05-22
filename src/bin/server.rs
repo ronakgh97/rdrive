@@ -3,11 +3,13 @@ use clap::Parser;
 use colored::Colorize;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+use hex::encode;
 use r_drive::args::{ServerArgs, ServerCommands};
 use r_drive::crypto::generate_ed25519_keypair;
 use r_drive::service::serve_tcp;
 use r_drive::{ascii_art, get_server_key_dir};
 use rand::RngExt;
+use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::Path;
 
@@ -25,8 +27,13 @@ async fn main() -> Result<()> {
 
                 match (pri_key.exists(), pub_key.exists()) {
                     (true, true) => {
-                        print!("{}", tokio::fs::read_to_string(&pub_key).await?.cyan());
+                        println!(
+                            "[Server FP] {}",
+                            encode(Sha256::digest(tokio::fs::read_to_string(&pub_key).await?))
+                                .cyan()
+                        );
                     }
+                    // TODO: hash cant be reproduce
                     (false, false) | (true, false) | (false, true) => {
                         let (new_pri, new_pub) = generate_ed25519_keypair()?;
                         let new_pri_pem = new_pri.to_pkcs8_pem(LineEnding::LF)?;
@@ -35,7 +42,11 @@ async fn main() -> Result<()> {
                         tokio::fs::create_dir_all(&key_path).await?;
                         tokio::fs::write(&pri_key, &new_pri_pem).await?;
                         tokio::fs::write(&pub_key, &new_pub_pem).await?;
-                        print!("{}", tokio::fs::read_to_string(&pub_key).await?.cyan());
+                        println!(
+                            "[Server FP] {}",
+                            encode(Sha256::digest(tokio::fs::read_to_string(&pub_key).await?))
+                                .cyan()
+                        );
                     }
                 }
                 serve_tcp(Some(port)).await?;

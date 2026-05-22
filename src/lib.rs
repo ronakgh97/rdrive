@@ -166,11 +166,15 @@ pub struct Catalog {
 
 impl Catalog {
     async fn read(path: &PathBuf) -> Result<Self> {
-        use postcard::from_bytes;
+        let str = tokio::fs::read_to_string(path).await?;
+        Ok(serde_json::from_str(&str)?)
+    }
+    async fn write(&mut self, path: &PathBuf) -> Result<()> {
+        use postcard::to_allocvec;
 
-        let file = tokio::fs::read(path).await?;
-        let catalog = from_bytes(&file)?;
-        Ok(catalog)
+        let bytes = to_allocvec(self)?;
+        tokio::fs::write(path, bytes).await?;
+        Ok(())
     }
 
     pub async fn read_or_create(path: &PathBuf) -> Result<Self> {
@@ -186,14 +190,6 @@ impl Catalog {
         };
 
         Ok(catalog)
-    }
-
-    async fn write(&mut self, path: &PathBuf) -> Result<()> {
-        use postcard::to_allocvec;
-
-        let bytes = to_allocvec(self)?;
-        tokio::fs::write(path, bytes).await?;
-        Ok(())
     }
 
     #[inline]
@@ -246,6 +242,10 @@ pub struct AuthServerMap {
 }
 
 impl AuthServerMap {
+    async fn read(path: &PathBuf) -> Result<Self> {
+        let str_text = tokio::fs::read_to_string(path).await?;
+        Ok(serde_json::from_str(&str_text)?)
+    }
     pub async fn read_or_create(path: &PathBuf) -> Result<Self> {
         let server_map = path
             .parent()
@@ -253,11 +253,7 @@ impl AuthServerMap {
         tokio::fs::create_dir_all(server_map).await?;
 
         let map = match path.exists() {
-            true => {
-                let str = tokio::fs::read_to_string(&path).await?;
-                serde_json::from_str(str.as_str())
-                    .map_err(|e| anyhow::anyhow!("Failed to parse server map JSON: {}", e))?
-            }
+            true => Self::read(path).await?,
             false => Self::default(),
         };
 
@@ -281,6 +277,9 @@ pub static ENABLE_CLIENT_WHITELIST: LazyLock<bool> = LazyLock::new(|| {
         .and_then(|s| s.parse().ok())
         .unwrap_or(true) // default to true
 });
+
+// TODO: pem is not needed, for internal ops
+//  use bytes to form key
 
 pub static SERVER_PUB_KEY_PEM: LazyLock<String> = LazyLock::new(|| {
     let pubkey = get_server_key_dir()

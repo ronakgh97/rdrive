@@ -15,8 +15,8 @@ Tweaking with Network Protocol & Security while building **State-of-the-art** Am
 
 **Limitations**
 
-- vulnerable to path injection `(maybe have some edge cases)` [SOLVED, Just use hash256]
-- first connection not secure `(user must trust the server first)` [USER END ERROR, NOT CODE]
+- vulnerable to path injection `(maybe have some edge cases)` [SOLVED, just use hash256]
+- first connection not secure `(user must trust the server first)` [USER END FAULT, NOT CODE]
 - no recovery keys
 - compute waste for unauthorized client access, init handshake/exchange takes some time, but maybe minor issue, idk
 - non-portable protocol, cross-lang support is a bit of chaos now
@@ -33,7 +33,7 @@ docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name
 
 ```shell
 # ssh into server or go inside container, 
-# and create ~/.rdrive/authorized_keys/<hex public key> dir for whitelisting client 
+# and create ~/.rdrive/authorized_keys/<sha512 public key pem> dir for whitelisting client 
 # or just ENABLE_CLIENT_WHITELIST false
 
 rdrive key # gen ed25519 keypair, does not overwrite until you do `-r` or `-a` for first init
@@ -60,20 +60,21 @@ Key rotated/synced successfully
 ```shell
 rdrive push --file dummy.bin --protocol v1 --port 3000
 Enter file key: ronak
-1 abc83897fc2c46e7941bb930e3715776 | pushed (2026-05-14 17:43:02) | pulled (never)
-2 d6942ba17c8e4ecf941bf5eb24144036 | pushed (2026-05-14 17:43:11) | pulled (never)
-Overwrite? [n/0]: 0
+1 f5eccbbce3f740388a78375e9585c2d9 | pushed (2026-05-22 08:09:02) | pulled (never)
+2 3d5675b781c143e881cf37ec81587462 | pushed (2026-05-22 08:11:03) | pulled (never)
+3 bd9365b0de4744b388482f1fb97a82e3 | pushed (2026-05-22 08:11:36) | pulled (2026-05-22 08:11:49)
+Overwrite? [n/0]: 2
 Starting upload: dummy.bin (578.9375 mb)
 File hash: 4ea1b5d551d3876f74b6634c4dde1611a8000d798044268ea103736221e7378e
-File ID: 9d6cd98c4503467faff3df10578e9e7c - Time took: 0.9695444
+File ID: 3d5675b781c143e881cf37ec81587462 - Network took: 0.3446355
 ````
 
 ```shell
 rdrive pull --protocol v1 --port 3000                 
-Enter file ID: abc83897fc2c46e7941bb930e3715776
+Enter file ID: bd9365b0de4744b388482f1fb97a82e3
 Enter file key: ronak
 Downloading: dummy.bin (578.9375 mb)
-Saved to: .\dummy.bin
+Saved to: .\dummy.bin - Network_time: 0.0032433
 ```
 
 Layering/Delta Transfer/CAS (WIP)
@@ -95,6 +96,41 @@ hash=346104ebf6a91848949f8f5af8bff439e58dd75854abdcf731b278bd2ce5f7a1, offset=20
 test layer::test_layering ... ok
 ```
 
+**How things are stored?**
+
+```shell
+.rdrive/
+  authorized_keys/ # white_list & user key-space dir
+    <sha512 public key1 PEM>/
+      rot.history # for key rotation history, use case?
+    <sha512 public key2 PEM>/
+      rot.history
+    ...
+    
+  storage/
+    <sha256 public key1>/
+      <sha256 file_key>/
+        <sha256 file-id>/ # CAS/Layering and all that stuff
+          e40164c21c10e...
+          b4661b0652c66...
+          ...
+          metadata.json
+    <sha256 public key1>/
+      <sha256 file_key>/
+        <sha256 file-id>/
+          346104ebf6a9w...
+          c9d122dcdfc70...
+          ...
+          metadata.json
+    ...
+            
+  server/ # keep them here for now
+    private.pem
+    public.pem
+```
+
+> NOTE: This can be improved by introducing sharding & stuffs
+
 TODO
 
 - Better Encryption for storage and metadata
@@ -106,7 +142,7 @@ TODO
 - Fix and improve the buffering and streaming for large files (diff hashing, chunking, chopping, etc.)
 - More protocol features like file listing, metadata retrieval, more commands etc. [DONE]
 - Graceful shutdown and cleanup
-- Little bit client polish, prefer 256 512 Hash over of raw hex, where can
+- Little bit client polish, prefer 256 512 Hash over of raw hex OR PEM usage, where can
 - Protocol v2 meant to be use UDP, but skill issues...
 - Encrypted share feature between clients (stateless relay server) without sharing the master key, maybe using some kind
   of temporary keys or
@@ -117,14 +153,14 @@ TODO
 - Multi-port support for better concurrency
 - rsync support (rolling hashing, delta transfers, etc.) CDC `LAYERING like docker`
 - Serialized headers, rm fragile parsing [DONE]
-- Add proper user-space (multiple users) [Partially DONE]
+- Add proper user-space (multiple users) [DONE]
 - DO some CAS magic for better storage efficiency and deduplication
 - Backup and restore features
-- Fix the MASTER_KEY/Encrption redundancy [Partially DONE]
+- Fix the MASTER_KEY/Encrption redundancy [DONE]
 - Proper secure protocol design, fuck TLS, SSL shit [Partially DONE]
 - Portable cross-lang protocol
 - Recoverable keys somehow?, better recover & key backups
-- Global Memory Pool per connection [Partially DONE]
+- Global Memory Pool per connection [DONE]
 - Internal server error feedback or other similar
 - Serialize overhead, some header does not that, fixed slice will do!!
 

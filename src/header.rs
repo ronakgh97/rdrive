@@ -118,14 +118,14 @@ impl RotateKeyHeader {
             .map_err(|e| anyhow::anyhow!("Failed to construct old public key from bytes: {}", e))?;
 
         let old_pub_key_hash = encode(Sha256::digest(old_pub_key.as_bytes()));
-        let user_path = get_storage_dir().await?.join(old_pub_key_hash);
+        let old_user_path = get_storage_dir().await?.join(old_pub_key_hash);
 
-        if !user_path.exists() {
+        if !old_user_path.exists() {
             return Err(anyhow::anyhow!("User not registered, not found"));
         }
 
         validate_signature(&self.old_public_bytes, &self.signature, nonce)?;
-        Ok(user_path)
+        Ok(old_user_path)
     }
     pub fn serialize(&self) -> Result<Vec<u8>> {
         to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
@@ -178,11 +178,7 @@ impl UploadHeader {
 
     pub fn validate(&self) -> Result<()> {
         // TODO: we dont need check or sanitized, just use hash
-        if self.file_id.is_empty()
-            || !(32..=256).contains(&self.file_id.len())
-            || self.file_id.chars().any(|c| c.is_control())
-            || !self.file_id.chars().all(|c| c.is_ascii_hexdigit())
-        {
+        if self.file_id.is_empty() || !(32..=256).contains(&self.file_id.len()) {
             return Err(anyhow::anyhow!(
                 "File ID must be a non-empty hex string between 32 and 256 characters, without control characters"
             ));

@@ -11,14 +11,15 @@ use r_drive::protocol_v1::{
     upload_client as upload_file_v1,
 };
 use r_drive::{Catalog, ascii_art, get_catalog_path, get_user_key_dir};
+use sha2::{Digest, Sha512};
 use std::io;
 use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = ClientArgs::parse();
-    let mut alloc_mem = vec![0u8; 12 * 1024 * 1024];
 
+    let mut alloc_mem = vec![0u8; 14 * 1024 * 1024];
     match args.command {
         // TODO: Somehow find a way to recover keys
         Some(ClientCommands::Key {
@@ -39,13 +40,13 @@ async fn main() -> Result<()> {
                 _ => None,
             };
 
+            // this oneshot, we don't want to lockout client
             if rot {
                 let (old_pri_pem, old_pub_pem) =
                     existing_keys.context("No existing keys. Cannot rotate.")?;
 
                 let signing_key = SigningKey::from_pkcs8_pem(&old_pri_pem)
                     .context("Bad private key, cannot rotate")?;
-
                 let old_public_key = VerifyingKey::from_public_key_pem(&old_pub_pem)
                     .context("Bad public key, cannot rotate")?;
 
@@ -54,8 +55,9 @@ async fn main() -> Result<()> {
                 let new_pub_pem = new_pub.to_public_key_pem(LineEnding::LF)?;
 
                 println!(
-                    "Preview Public key (PEM HEX):\n{}",
-                    hex::encode(new_pub_pem.as_bytes()).green()
+                    "Preview Public key (PEM SHA)\n{} -> {}",
+                    hex::encode(Sha512::digest(&old_pub_pem)).yellow(),
+                    hex::encode(Sha512::digest(&new_pub_pem)).green()
                 );
 
                 // Try sync with server BEFORE writing to disk!!!
@@ -104,9 +106,11 @@ async fn main() -> Result<()> {
                 }
             };
 
+            // TODO: hash cant be reproduce
+            let pub_key_pem = verifying_key.to_public_key_pem(LineEnding::LF)?;
             println!(
-                "Public key (PEM HEX):\n{}",
-                hex::encode(verifying_key.to_public_key_pem(LineEnding::LF)?.as_bytes()).green()
+                "Public key (PEM SHA)\n{}",
+                hex::encode(Sha512::digest(&pub_key_pem)).green()
             );
 
             if auth {
@@ -122,7 +126,7 @@ async fn main() -> Result<()> {
             } else {
                 // TODO: do a little user prompt here after showing key
                 println!(
-                    "Make sure to whitelist your HEX public key on the server, If not already auth"
+                    "Make sure to mkdir (whitelist) your SHA512 public key on the server ~/.rdrive/authorized_keys/"
                 );
             }
         }
@@ -142,12 +146,9 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
 
-            let signing_key = SigningKey::from_pkcs8_pem(
-                &tokio::fs::read_to_string(&private_key_path)
-                    .await
-                    .context("Failed to read private key for push")?,
-            )
-            .context("Bad private key, cannot push")?;
+            let signing_key =
+                SigningKey::from_pkcs8_pem(&tokio::fs::read_to_string(&private_key_path).await?)
+                    .context("Bad private key, cannot push")?;
 
             if !file.exists() {
                 eprintln!("File not found: {}", file.display());
@@ -255,12 +256,9 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
 
-            let signing_key = SigningKey::from_pkcs8_pem(
-                &tokio::fs::read_to_string(&private_key_path)
-                    .await
-                    .context("Failed to read private key for pull")?,
-            )
-            .context("Bad private key, cannot pull")?;
+            let signing_key =
+                SigningKey::from_pkcs8_pem(&tokio::fs::read_to_string(&private_key_path).await?)
+                    .context("Bad private key, cannot pull")?;
 
             let (file_id, file_key) = if let (Some(id), Some(key)) = (file_id, file_key) {
                 (id, key)
@@ -357,16 +355,13 @@ async fn main() -> Result<()> {
             let public_key_path = user_path.join("public_key.pem");
 
             if !private_key_path.exists() && public_key_path.exists() {
-                eprintln!("Public key exists but private key is missing, cannot pull.");
+                eprintln!("Public key exists but private key is missing, cannot status.");
                 std::process::exit(1);
             }
 
-            let signing_key = SigningKey::from_pkcs8_pem(
-                &tokio::fs::read_to_string(&private_key_path)
-                    .await
-                    .context("Failed to read private key for pull")?,
-            )
-            .context("Bad private key, cannot pull")?;
+            let signing_key =
+                SigningKey::from_pkcs8_pem(&tokio::fs::read_to_string(&private_key_path).await?)
+                    .context("Bad private key, cannot status")?;
 
             match protocol.as_str() {
                 "v1" => {
