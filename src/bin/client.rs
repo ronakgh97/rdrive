@@ -6,7 +6,7 @@ use hex::{decode, encode};
 use r_drive::args::{ClientArgs, ClientCommands};
 use r_drive::crypto::generate_ed25519_keypair;
 use r_drive::protocol_v1::{
-    auth_client, download_client as download_file_v1, get_server_status,
+    auth_client, client_echo_debug, download_client as download_file_v1, get_server_status,
     upload_client as upload_file_v1,
 };
 use r_drive::{Catalog, ascii_art, get_catalog_path, get_user_key_dir};
@@ -17,7 +17,7 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = ClientArgs::parse();
-    let mut alloc_mem = vec![0u8; 14 * 1024 * 1024];
+    let mut alloc_mem = vec![0u8; 32 * 1024 * 1024];
 
     let user_path = get_user_key_dir()?;
     let private_key_path = user_path.join("private_ed25519.key");
@@ -138,6 +138,20 @@ async fn main() -> Result<()> {
                     "Make sure to mkdir (whitelist) your SHA256 public key on the server ~/.rdrive/authorized_keys/"
                 );
             }
+        }
+        Some(ClientCommands::Debug { address, port }) => {
+            if !private_key_path.exists() && !public_key_path.exists() {
+                eprintln!("No keys found, please run `rdrive key <args?>`.");
+                std::process::exit(1);
+            }
+
+            let key_hex: [u8; 32] =
+                decode(tokio::fs::read_to_string(&private_key_path).await?.trim())?
+                    .try_into()
+                    .map_err(|e| anyhow!("Invalid private key length: {:?}", e))?;
+            let signing_key = SigningKey::from_bytes(&key_hex);
+
+            client_echo_debug(&address, port, signing_key, &mut alloc_mem).await?;
         }
         Some(ClientCommands::Push {
             file,

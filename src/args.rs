@@ -63,6 +63,18 @@ pub enum ClientCommands {
         rot: bool,
     },
 
+    /// Loop Echo debug info from the server, including latency and server time,
+    /// this is useful for testing connectivity and latency, configurable using ENABLE_ECHO
+    Debug {
+        /// Address of the server to connect to (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        address: String,
+
+        /// Port to connect to the server (default: 3000)
+        #[arg(long, default_value = "3000")]
+        port: u16,
+    },
+
     /// Upload a file to the server
     Push {
         /// Path to the file to upload

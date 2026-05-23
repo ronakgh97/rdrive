@@ -2,15 +2,16 @@
 
 use crate::crypto::{NONCE_LEN, TAG_LEN, decrypt_into, encrypt_into, generate_x25519_keypair};
 use crate::header::{
-    ClientHello, Command, DownloadHeader, DownloadResponse, ErrorHeader, NewKeyHeader,
-    RotateKeyHeader, ServerHello, StatusHeader, UploadHeader, UploadResponse, WarnHeader,
+    ClientHello, Command, DownloadHeader, DownloadResponse, EchoDebugHeader, ErrorHeader,
+    NewKeyHeader, RotateKeyHeader, ServerHello, StatusHeader, UploadHeader, UploadResponse,
+    WarnHeader,
 };
 use crate::{
-    ACTIVE_CONNECTIONS, AuthServerMap, ENABLE_CLIENT_WHITELIST, MAX_CONNECTIONS, MetadataFile,
-    NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_PRI_KEY_BYTES,
-    SERVER_PUB_KEY_BYTES, SERVER_TRACKER, START_TIME, Tracker, WRITE_TIMEOUT, debug, error,
-    file_hasher_async, get_authorized_client_dir, get_authorized_server_map_path, get_storage_dir,
-    hold_file_lock, info, release_file_lock, trace, try_get_uptime_hrs, warn,
+    ACTIVE_CONNECTIONS, AuthServerMap, ENABLE_CLIENT_WHITELIST, ENABLE_ECHO, MAX_CONNECTIONS,
+    MetadataFile, NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT,
+    SERVER_PRI_KEY_BYTES, SERVER_PUB_KEY_BYTES, SERVER_TRACKER, START_TIME, Tracker, WRITE_TIMEOUT,
+    debug, error, file_hasher_async, get_authorized_client_dir, get_authorized_server_map_path,
+    get_storage_dir, hold_file_lock, info, release_file_lock, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -18,7 +19,7 @@ use ed25519_dalek::ed25519::signature::{AsyncSigner, AsyncVerifier};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hex::{decode, encode};
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::Rng;
+use rand::{Rng, RngExt, rng};
 use serde::Serialize;
 use sha2::{Digest, Sha256, Sha512};
 use std::cmp::min;
@@ -26,7 +27,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
@@ -145,6 +146,32 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
         }
     };
     match command {
+        Command::Echo => {
+            debug!("Received ECHO request");
+
+            match *ENABLE_ECHO {
+                true => {
+                    handle_echo_debug(&mut reader, &mut writer, &session_key, &mut global_pool)
+                        .await?;
+                    writer.flush().await?;
+                    Ok(())
+                }
+                false => {
+                    send_failed(
+                        &mut writer,
+                        ErrorHeader {
+                            code: 403,
+                            message: "ECHO command is disabled on this server".to_string(),
+                        },
+                        &session_key,
+                        &mut global_pool,
+                    )
+                    .await?;
+                    writer.flush().await?;
+                    Ok(())
+                }
+            }
+        }
         Command::Auth(flags) => {
             debug!("Received INIT request");
             handle_auth_keys(
@@ -238,7 +265,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
 /// Read 4 bytes for frame length with timeout, return error on timeout or read failure
 #[inline(always)]
 async fn read_frame_length<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u32> {
-    const MAX_FRAME_LENGTH: u32 = 1024 * 1024 * 12;
+    const MAX_FRAME_LENGTH: u32 = 1024 * 1024 * 16;
     let mut len_buf = [0u8; 4];
     let Ok(result) = timeout(READ_TIMEOUT, reader.read_exact(&mut len_buf)).await else {
         return Err(anyhow::anyhow!("Timeout reading frame length"));
@@ -491,7 +518,7 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     // prepare server_hello
     let server_hello = {
         let mut nonce = [0u8; 32];
-        rand::rng().fill_bytes(&mut nonce);
+        rng().fill_bytes(&mut nonce);
 
         let ed22519_pri = SigningKey::from_bytes(&SERVER_PRI_KEY_BYTES);
         let ed22519_pub = VerifyingKey::from_bytes(&SERVER_PUB_KEY_BYTES)?;
@@ -524,7 +551,7 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     // send nonce
     let mut nonce = [0u8; 64];
-    rand::rng().fill_bytes(&mut nonce);
+    rng().fill_bytes(&mut nonce);
     nonce = Sha512::digest(nonce).into();
     write_raw_frame(writer, &nonce).await?;
 
@@ -561,6 +588,60 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     ))
 }
 
+/// Handle ECHO command: read encrypted payloads in a loop, respond with payload hash and server timestamp, until client sends quit command or disconnects
+async fn handle_echo_debug<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+    session_key: &[u8; 32],
+    mem_pool: &mut Vec<u8>,
+) -> Result<()> {
+    loop {
+        let server_timestamp = chrono::Utc::now().timestamp_millis();
+        // read any payload
+        let payload = match read_encrypt_data_into(reader, session_key, mem_pool).await {
+            Ok(p) => p,
+            Err(e) => {
+                // eof is fine here
+                if [
+                    "eof",
+                    "early eof",
+                    "unexpected eof",
+                    "forcibly closed",
+                    "connection reset",
+                    "closed by the remote",
+                    "connection aborted",
+                    "broken pipe",
+                ]
+                .iter()
+                .any(|pattern| e.to_string().to_lowercase().contains(pattern))
+                {
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
+
+        match payload {
+            b"" | b" " | b"q" | b"quit" | b"exit" => {
+                return Ok(());
+            }
+            _ => {
+                let echo = EchoDebugHeader {
+                    payload_len: payload.len() as u32,
+                    payload_hash: Sha256::digest(payload).into(),
+                    timestamp_ms: server_timestamp,
+                };
+
+                timeout(
+                    WRITE_TIMEOUT,
+                    write_encrypt_frame(writer, &echo.serialize()?, session_key, mem_pool),
+                )
+                .await??;
+            }
+        }
+    }
+}
+
 /// Handle key registration and rotation: send nonce challenge, verify signature, create/rename user directory, send ACK or error response
 async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
@@ -571,7 +652,7 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     // doing this again
     let mut nonce = [0u8; 32];
-    rand::rng().fill_bytes(&mut nonce);
+    rng().fill_bytes(&mut nonce);
 
     // this is cool
     for _ in 0..6 {
@@ -1131,7 +1212,7 @@ async fn client_handshake_helper(
     // construct client_hello
     let client_hello = {
         let mut nonce = [0u8; 32];
-        rand::rng().fill_bytes(&mut nonce);
+        rng().fill_bytes(&mut nonce);
         ClientHello {
             x22519_key: x25519_pub.to_bytes(),
             nonce,
@@ -1264,6 +1345,76 @@ async fn client_handshake_helper(
     };
 
     Ok((session_key, stream))
+}
+
+// TODO; add args to cli
+/// Client function to perform echo debug: connect to server, do handshake, send echo command, then continuously send random payloads and print server response with RTT and timestamp gap
+pub async fn client_echo_debug(
+    host: &str,
+    port: u16,
+    signing_key: SigningKey,
+    mem_pool: &mut Vec<u8>,
+) -> Result<()> {
+    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("Handshake failed: {}", e))?;
+
+    let (reader, writer) = stream.split();
+    let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
+    let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
+
+    let mut thread_rng = rng();
+    let dur = Duration::from_secs(1);
+
+    let request = Command::Echo.serialize()?;
+    write_encrypt_frame(&mut writer, &request, &session_key, mem_pool).await?;
+
+    //TODO; read any err or rej
+
+    println!("Session Key: {}", encode(session_key).green());
+
+    let mut rand_payload_buf = vec![0u8; 1024 * 1024];
+    loop {
+        // randomize
+        let rand_len = rng().random_range(1024 * 1024..=14 * 1024 * 1024);
+        rand_payload_buf.resize(rand_len, 0);
+        thread_rng.fill_bytes(&mut rand_payload_buf);
+
+        let compute_payload_hash = encode(Sha256::digest(&rand_payload_buf));
+
+        let send_time = Instant::now();
+        write_encrypt_frame(&mut writer, &rand_payload_buf, &session_key, mem_pool)
+            .await
+            .context("Failed to send echo payload")?;
+
+        let response = read_encrypt_data_into(&mut reader, &session_key, mem_pool)
+            .await
+            .context("Failed to read echo response")?;
+
+        let echo = EchoDebugHeader::deserialize(response)?;
+        let rtt = send_time.elapsed();
+        let client_timestamp = chrono::Utc::now().timestamp_millis();
+
+        if compute_payload_hash != encode(echo.payload_hash) {
+            eprintln!(
+                "Payload hash mismatch! Sent: {}, Received: {}",
+                compute_payload_hash,
+                encode(echo.payload_hash)
+            );
+        }
+
+        println!("---------------------------");
+        println!("Payload Size:      {} bytes", echo.payload_len);
+        println!("Payload SHA256:    {}", encode(echo.payload_hash));
+        println!(
+            "Timestamp Gap:          {} ms",
+            client_timestamp - echo.timestamp_ms
+        );
+        println!("Total Round-Trip:  {:?}", rtt);
+
+        mem_pool.clear();
+        tokio::time::sleep(dur).await;
+    }
 }
 
 // TODO: Too many repetitive lazy code, very poor thinking, refactor later

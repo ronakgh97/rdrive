@@ -43,6 +43,7 @@ impl ServerHello {
 
 #[derive(Serialize, Deserialize)]
 pub enum Command {
+    Echo,
     Auth(u8), // flags -> 1/2 = new/rotate ...bool not used, cause I don't like enum for obvious reasons
     Upload(UploadHeader),
     Download(DownloadHeader),
@@ -58,15 +59,16 @@ impl Command {
     }
 }
 
-/// Echo Test for debugging, not used in production, just a simple header to test the connection and latency
+/// Echo Test for debugging, not used in production,
+/// just a simple header to test the connection, encryption and latency
 #[derive(Serialize, Deserialize)]
 pub struct EchoDebugHeader {
-    /// secret from x25519 exchange
-    session_key: [u8; 32],
+    /// size of payload
+    pub payload_len: u32,
     /// sha256 of the payload
-    payload_hash: [u8; 32],
+    pub payload_hash: [u8; 32],
     /// timestamp before returning
-    timestamp_ms: u64,
+    pub timestamp_ms: i64,
 }
 
 impl EchoDebugHeader {

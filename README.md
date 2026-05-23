@@ -27,7 +27,7 @@ Use docker [image](https://hub.docker.com/repository/docker/ronakgh97/rdrive/gen
 auth/push/pull files
 
 ```shell
-docker pull ronakgh97/rdrive:latest (<128 mb)
+docker pull ronakgh97/rdrive:latest (<125.26 MB)
 docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name rdrive-node ronakgh97/rdrive:latest
 ```
 

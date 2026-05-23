@@ -272,7 +272,15 @@ impl AuthServerMap {
 pub static START_TIME: OnceLock<chrono::DateTime<Local>> = OnceLock::new();
 pub static ACTIVE_CONNECTIONS: LazyLock<Arc<AtomicUsize>> =
     LazyLock::new(|| Arc::new(AtomicUsize::new(0)));
+pub static ENABLE_ECHO: LazyLock<bool> = LazyLock::new(|| {
+    dotenv::dotenv().ok();
+    std::env::var("ENABLE_ECHO")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(false) // default to false
+});
 pub static ENABLE_CLIENT_WHITELIST: LazyLock<bool> = LazyLock::new(|| {
+    dotenv::dotenv().ok();
     std::env::var("ENABLE_CLIENT_WHITELIST")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -369,12 +377,14 @@ pub static SERVER_PRI_KEY_BYTES: LazyLock<[u8; 32]> = LazyLock::new(|| {
 });
 
 pub static MAX_CONNECTIONS: LazyLock<usize> = LazyLock::new(|| {
+    dotenv::dotenv().ok();
     std::env::var("MAX_CONNECTIONS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(256) // default to 256 connections
 });
 pub static MAX_FILE_SIZE_GB: LazyLock<u64> = LazyLock::new(|| {
+    dotenv::dotenv().ok();
     std::env::var("MAX_FILE_SIZE_GB")
         .ok()
         .and_then(|s| s.parse().ok())
