@@ -78,7 +78,7 @@ pub async fn start_tcp_server(port: u16, storage_path: Arc<PathBuf>) -> Result<(
 /// Handle a single client connection, read command and dispatch to appropriate handler
 #[inline]
 async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result<()> {
-    stream.set_nodelay(true).ok();
+    stream.set_nodelay(true)?;
     let (reader, writer) = stream.split();
     let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
     let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
@@ -601,7 +601,7 @@ async fn handle_echo_debug<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         let payload = match read_encrypt_data_into(reader, session_key, mem_pool).await {
             Ok(p) => p,
             Err(e) => {
-                // eof is fine here
+                // eof & disconnect is fine here
                 if [
                     "eof",
                     "early eof",
@@ -1197,7 +1197,7 @@ async fn client_handshake_helper(
     signing_key: &SigningKey,
 ) -> Result<([u8; 32], TcpStream)> {
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
-    stream.set_nodelay(true).ok();
+    stream.set_nodelay(true)?;
 
     let server_ip = stream
         .peer_addr()
@@ -1363,17 +1363,26 @@ pub async fn client_echo_debug(
     let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
     let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
 
-    let mut thread_rng = rng();
-    let dur = Duration::from_secs(1);
-
     let request = Command::Echo.serialize()?;
     write_encrypt_frame(&mut writer, &request, &session_key, mem_pool).await?;
 
     //TODO; read any err or rej
 
-    println!("Session Key: {}", encode(session_key).green());
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(ProgressStyle::with_template("{msg}")?);
 
+    println!("Session Key: {}\n", encode(session_key).green());
+
+    let mut thread_rng = rng();
+    let dur = Duration::from_millis(250);
+    const MAX_RECORD: usize = 128;
+    let mut record_count = 0;
+    let mut payload_acc = 0;
     let mut rand_payload_buf = vec![0u8; 1024 * 1024];
+    let mut record_timestamp = [0i64; MAX_RECORD];
+    let mut record_rtt = [0u128; MAX_RECORD];
+
+    // TODO; add some guardrails
     loop {
         // randomize
         let rand_len = rng().random_range(1024 * 1024..=14 * 1024 * 1024);
@@ -1392,8 +1401,25 @@ pub async fn client_echo_debug(
             .context("Failed to read echo response")?;
 
         let echo = EchoDebugHeader::deserialize(response)?;
+
         let rtt = send_time.elapsed();
         let client_timestamp = chrono::Utc::now().timestamp_millis();
+        let timestamp_delta = client_timestamp - echo.timestamp_ms;
+        let payload_mb = echo.payload_len / (1024 * 1024);
+
+        record_timestamp[record_count % MAX_RECORD] = timestamp_delta;
+        record_rtt[record_count % MAX_RECORD] = rtt.as_millis();
+
+        let avg_timestamp = record_timestamp
+            .iter()
+            .take((record_count + 1).min(MAX_RECORD))
+            .sum::<i64>()
+            / (record_count + 1).min(MAX_RECORD) as i64;
+        let avg_rtt = record_rtt
+            .iter()
+            .take((record_count + 1).min(MAX_RECORD))
+            .sum::<u128>()
+            / (record_count + 1).min(MAX_RECORD) as u128;
 
         if compute_payload_hash != encode(echo.payload_hash) {
             eprintln!(
@@ -1403,15 +1429,15 @@ pub async fn client_echo_debug(
             );
         }
 
-        println!("---------------------------");
-        println!("Payload Size:      {} bytes", echo.payload_len);
-        println!("Payload SHA256:    {}", encode(echo.payload_hash));
-        println!(
-            "Timestamp Gap:          {} ms",
-            client_timestamp - echo.timestamp_ms
-        );
-        println!("Total Round-Trip:  {:?}", rtt);
+        pb.set_message(format!(
+            "Sample: {}\nPayload: {} MB (total {})\nSha256: {}\nTimestamp delta: {} ms (avg {})\nRTT: {} ms (avg {})",
+            record_count, payload_mb, payload_acc,
+            encode(echo.payload_hash), timestamp_delta,
+            avg_timestamp, rtt.as_millis(), avg_rtt
+        ));
 
+        record_count += 1;
+        payload_acc += echo.payload_len / (1024 * 1024);
         mem_pool.clear();
         tokio::time::sleep(dur).await;
     }
@@ -1599,7 +1625,7 @@ pub async fn upload_client(
     stream.shutdown().await?;
 
     println!(
-        "File ID: {} - Network took: {}",
+        "File ID: {} - Network_time: {}s",
         rsp.file_id, rsp.network_time
     );
 
@@ -1706,7 +1732,7 @@ pub async fn download_client(
     stream.shutdown().await.ok();
 
     println!(
-        "Saved to: {} - Network_time: {}",
+        "Saved to: {} - Network_time: {}s",
         output_path.display(),
         &response.network_time
     );

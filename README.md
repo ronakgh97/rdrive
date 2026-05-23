@@ -74,7 +74,7 @@ Enter file key: ronak
 Overwrite? [n/0]: 2
 Starting upload: dummy.bin (578.9375 mb)
 File hash: 4ea1b5d551d3876f74b6634c4dde1611a8000d798044268ea103736221e7378e
-File ID: 3d5675b781c143e881cf37ec81587462 - Network took: 0.3446355
+File ID: 3d5675b781c143e881cf37ec81587462 - Network_time: 0.3446355
 ````
 
 ```shell
@@ -159,7 +159,7 @@ TODO
 - Too many repetitive code, need to refactor and clean up the codebase
 - Still some buffering issues, data gets stalls, does not flush properly [DONE]
 - Multi-port support for better concurrency
-- rsync support (rolling hashing, delta transfers, etc.) CDC `LAYERING like docker`
+- rsync support (rolling hashing, delta transfers, etc.) CDC `LAYERING like docker` [Partially DONE]
 - Serialized headers, rm fragile parsing [DONE]
 - Add proper user-space (multiple users) [DONE]
 - DO some CAS magic for better storage efficiency and deduplication
