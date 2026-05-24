@@ -12,15 +12,15 @@ use tokio::io::{BufReader, SeekFrom};
 //  if changes, we can just overwrite or write new <hash>.bin file(spoilers warning: versioning) and finally update metadata file
 //  Some like this
 //   storage/
-//   ├ fileA (file_uuid)/
-//   │   ├ chunk1 (layer hash)
-//   │   ├ chunk2 (layer hash)
-//   |   ├ metadata (store file_name, file_size, file_full_hash, map<ptr_offset, layer_hash>)
+//   ├ fileA <file_uuid>/
+//   │   ├ chunk1_hash (layer hash)
+//   │   ├ chunk2_hash (layer hash)
+//   |   ├ file_uuid.meta (store file_name, file_size, file_full_hash, map<ptr_offset, layer_hash>)
 //   │
-//   ├ fileB(file_uuid)/
-//   │   ├ chunk1  (layer hash)
-//   │   ├ chunk2 (layer hash)
-//   |   ├ metadata (store file_name, file_size, file_full_hash, map<ptr_offset, layer_hash>)
+//   ├ fileB <file_uuid>/
+//   │   ├ chunk1_hash (layer hash)
+//   │   ├ chunk2_hash (layer hash)
+//   |   ├ file_uuid.meta (store file_name, file_size, file_full_hash, map<ptr_offset, layer_hash>)
 
 const LAYER_SIZE: usize = 1024 * 1024 * 64;
 

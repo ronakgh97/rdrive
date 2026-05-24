@@ -117,7 +117,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
 
     // global memory pool for header processing, to reduce allocations,
     // this is safe because we process one header at a time
-    let mut global_pool = vec![0u8; 4 * 1024 * 1024];
+    let mut global_pool = vec![0u8; 14 * 1024 * 1024];
 
     let command = match read_headers(&mut reader, &session_key, &mut global_pool).await {
         Ok(cmd) => cmd,
@@ -553,6 +553,8 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let mut nonce = [0u8; 64];
     rng().fill_bytes(&mut nonce);
     nonce = Sha512::digest(nonce).into();
+    nonce = Sha512::digest(nonce).into();
+    nonce = Sha512::digest(nonce).into();
     write_raw_frame(writer, &nonce).await?;
 
     // explicit flush b4 only read
@@ -655,9 +657,9 @@ async fn handle_auth_keys<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     rng().fill_bytes(&mut nonce);
 
     // this is cool
-    for _ in 0..6 {
-        nonce = Sha256::digest(nonce).into();
-    }
+    nonce = Sha256::digest(nonce).into();
+    nonce = Sha256::digest(nonce).into();
+    nonce = Sha256::digest(nonce).into();
 
     // send nonce challenge to client for signature verification, FIRST
     // hashing for good sake, 32 bytes nice
@@ -1438,7 +1440,6 @@ pub async fn client_echo_debug(
 
         record_count += 1;
         payload_acc += echo.payload_len / (1024 * 1024);
-        mem_pool.clear();
         tokio::time::sleep(dur).await;
     }
 }

@@ -1,7 +1,5 @@
 Tweaking with Network Protocol & Security while building **State-of-the-art** Amazon s3 ***COMMUNIST VERSION***
 
-`Goal: Protect servers from 'bad' users. Protect users from 'bad' servers`
-
 **Features**
 
 - file-system native database `directories are just mere hash table`
@@ -154,7 +152,7 @@ TODO
 - Protocol v2 meant to be use UDP, but skill issues...
 - Encrypted share feature between clients (stateless relay server) without sharing the master key, maybe using some kind
   of temporary keys or
-  something, idk [Partially DONE]
+  something, IDK [Partially DONE]
 - Migrate to async architecture (TOKIO) [DONE]
 - Too many repetitive code, need to refactor and clean up the codebase
 - Still some buffering issues, data gets stalls, does not flush properly [DONE]
@@ -171,6 +169,7 @@ TODO
 - Global Memory Pool per connection [DONE]
 - Internal server error feedback or other similar
 - Serialize overhead, some header does not that, fixed slice will do!!
+- Rate limiting & basic guardrails
 
 https://www.backblaze.com/docs/cloud-storage-about-backblaze-b2-cloud-storage
 https://www.rfc-editor.org/rfc/rfc8032
