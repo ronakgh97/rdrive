@@ -67,7 +67,7 @@ pub struct EchoDebugHeader {
     /// sha256 of the payload
     pub payload_hash: [u8; 32],
     /// timestamp before returning
-    pub timestamp_ms: i64,
+    pub process_ms: u128,
 }
 
 impl EchoDebugHeader {

@@ -172,7 +172,7 @@ impl Catalog {
     async fn write(&mut self, path: &PathBuf) -> Result<()> {
         let str = serde_json::to_string_pretty(self)
             .map_err(|e| anyhow::anyhow!("Failed to serialize catalog to JSON: {}", e))?;
-        tokio::fs::write(path, str).await?;
+        tokio::fs::write(path, str.into_bytes()).await?;
         Ok(())
     }
 
@@ -261,7 +261,7 @@ impl AuthServerMap {
 
     pub async fn write(&mut self, path: &PathBuf) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;
-        tokio::fs::write(path, json).await?;
+        tokio::fs::write(path, json.into_bytes()).await?;
         Ok(())
     }
 }

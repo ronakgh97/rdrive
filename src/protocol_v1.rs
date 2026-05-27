@@ -108,7 +108,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
 
     let session_key: [u8; 32] = {
         // format [k]..[1]..[k]..[1]
-        let mut key = [1u8; 128];
+        let mut key = [0xFu8; 128];
         key[0..32].copy_from_slice(&shared_key);
         key[64..96].copy_from_slice(&shared_key);
         Sha256::digest(key).into() // TODO; I HATEEEEE ".into()" SO MUCHHHHHHH
@@ -525,7 +525,7 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         let ed22519_pub = VerifyingKey::from_bytes(&SERVER_PUB_KEY_BYTES)?;
 
         // construct data to be signed
-        let mut data_signed = [9u8; 128];
+        let mut data_signed = [0u8; 128];
         data_signed[0..32].copy_from_slice(&client_hello.nonce);
         data_signed[32..64].copy_from_slice(&nonce);
         data_signed[64..96].copy_from_slice(&client_hello.x22519_key);
@@ -591,6 +591,8 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     ))
 }
 
+// TODO: do a proper tls perf & data throughput test
+
 /// Handle ECHO command: read encrypted payloads in a loop, respond with payload hash and server timestamp, until client sends quit command or disconnects
 async fn handle_echo_debug<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
@@ -599,7 +601,6 @@ async fn handle_echo_debug<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
     loop {
-        let server_timestamp = chrono::Utc::now().timestamp_millis();
         // read any payload
         let payload = match read_encrypt_data_into(reader, session_key, mem_pool).await {
             Ok(p) => p,
@@ -624,6 +625,7 @@ async fn handle_echo_debug<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
             }
         };
 
+        let time_process_ms = Instant::now();
         match payload {
             b"" | b" " | b"q" | b"quit" | b"exit" => {
                 return Ok(());
@@ -632,7 +634,7 @@ async fn handle_echo_debug<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 let echo = EchoDebugHeader {
                     payload_len: payload.len() as u32,
                     payload_hash: Sha256::digest(payload).into(),
-                    timestamp_ms: server_timestamp,
+                    process_ms: time_process_ms.elapsed().as_millis(),
                 };
 
                 timeout(
@@ -1306,7 +1308,7 @@ async fn client_handshake_helper(
     };
 
     // construct signed payload SAME AS SERVER
-    let mut data_signed = [9u8; 128];
+    let mut data_signed = [0u8; 128];
     data_signed[0..32].copy_from_slice(&client_hello.nonce);
     data_signed[32..64].copy_from_slice(&server_hello.nonce);
     data_signed[64..96].copy_from_slice(&x25519_pub.to_bytes());
@@ -1341,7 +1343,7 @@ async fn client_handshake_helper(
             .diffie_hellman(&PublicKey::from(server_hello.x22519_key))
             .to_bytes();
         // same as server
-        let mut key = [1u8; 128];
+        let mut key = [0xFu8; 128];
         key[0..32].copy_from_slice(&shared_key);
         key[64..96].copy_from_slice(&shared_key);
         Sha256::digest(key).into()
@@ -1350,7 +1352,6 @@ async fn client_handshake_helper(
     Ok((session_key, stream))
 }
 
-// TODO; add args to cli
 /// Client function to perform echo debug: connect to server, do handshake, send echo command, then continuously send random payloads and print server response with RTT and timestamp gap
 pub async fn client_echo_debug(
     host: &str,
@@ -1383,17 +1384,16 @@ pub async fn client_echo_debug(
     let mut record_count = 0;
     let mut payload_acc = 0;
     let mut rand_payload_buf = vec![0u8; 1024 * 1024];
-    let mut record_timestamp = [0i64; MAX_RECORD];
+    let mut record_process_time = [0u128; MAX_RECORD];
     let mut record_rtt = [0u128; MAX_RECORD];
 
     // TODO; add some guardrails
     loop {
+        let range = 1024 * 1024..=14 * 1024 * 1024;
         // randomize
-        let rand_len = rng().random_range(1024 * 1024..=14 * 1024 * 1024);
+        let rand_len = rng().random_range(range);
         rand_payload_buf.resize(rand_len, 0);
         rand.fill_bytes(&mut rand_payload_buf);
-
-        let compute_payload_hash = encode(Sha256::digest(&rand_payload_buf));
 
         let send_time = Instant::now();
         write_encrypt_frame(&mut writer, &rand_payload_buf, &session_key, mem_pool)
@@ -1407,24 +1407,23 @@ pub async fn client_echo_debug(
         let echo = EchoDebugHeader::deserialize(response)?;
 
         let rtt = send_time.elapsed();
-        let client_timestamp = chrono::Utc::now().timestamp_millis();
-        let timestamp_delta = client_timestamp - echo.timestamp_ms;
         let payload_mb = echo.payload_len / (1024 * 1024);
 
-        record_timestamp[record_count % MAX_RECORD] = timestamp_delta;
+        record_process_time[record_count % MAX_RECORD] = echo.process_ms;
         record_rtt[record_count % MAX_RECORD] = rtt.as_millis();
 
-        let avg_timestamp = record_timestamp
+        let avg_pt = record_process_time
             .iter()
             .take((record_count + 1).min(MAX_RECORD))
-            .sum::<i64>()
-            / (record_count + 1).min(MAX_RECORD) as i64;
+            .sum::<u128>()
+            / (record_count + 1).min(MAX_RECORD) as u128;
         let avg_rtt = record_rtt
             .iter()
             .take((record_count + 1).min(MAX_RECORD))
             .sum::<u128>()
             / (record_count + 1).min(MAX_RECORD) as u128;
 
+        let compute_payload_hash = encode(Sha256::digest(&rand_payload_buf));
         if compute_payload_hash != encode(echo.payload_hash) {
             eprintln!(
                 "Payload hash mismatch! Sent: {}, Received: {}",
@@ -1434,10 +1433,10 @@ pub async fn client_echo_debug(
         }
 
         pb.set_message(format!(
-            "Sample: {}\nPayload: {} MB (total {})\nSha256: {}\nTimestamp delta: {} ms (avg {})\nRTT: {} ms (avg {})",
+            "Sample: {}\nPayload [1MB..14MB]: {} MB (total {})\nSha256: {}\nServer IO: {} ms (avg {})\nRTT: {} ms (avg {})",
             record_count, payload_mb, payload_acc,
-            encode(echo.payload_hash), timestamp_delta,
-            avg_timestamp, rtt.as_millis(), avg_rtt
+            encode(echo.payload_hash), echo.process_ms,
+            avg_pt, rtt.as_millis(), avg_rtt
         ));
 
         record_count += 1;
