@@ -1,13 +1,25 @@
-use rand::Rng;
+// TODO: Can be improved????
+
+use anyhow::Result;
 use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use tokio::fs::File;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use std::sync::Arc;
+use std::sync::Mutex;
+use tokio::task::JoinHandle;
+
+const DATA_PER_THREAD: usize = 32 * 1024 * 1024;
+
+struct SharedState {
+    writer: BufWriter<File>,
+    hasher: Sha256,
+}
 
 /// A simple utility to generate a dummy file with random data,
 /// used for testing upload/download performance, layering debug, and integrity
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     let time = std::time::Instant::now();
     let size_mb: usize = std::env::args()
         .nth(1)
@@ -25,24 +37,46 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let file = File::create(&path).await?;
-    file.set_len(size_bytes as u64).await?;
-    let mut buf_file = BufWriter::with_capacity(32 * 1024 * 1024, file);
-    let mut rng = rand::rng();
-    let mut hasher = Sha256::new();
-    let mut written: usize = 0;
-    let mut write_buf = vec![0u8; 18 * 1024 * 1024];
+    let file = File::create(&path)?;
+    let state = Arc::new(Mutex::new(SharedState {
+        writer: BufWriter::with_capacity(64 * 1024 * 1024, file),
+        hasher: Sha256::new(),
+    }));
 
-    while written < size_bytes {
-        let to_write = std::cmp::min(size_bytes - written, write_buf.len());
-        rng.fill_bytes(&mut write_buf[..to_write]);
-        hasher.update(&write_buf[..to_write]);
-        buf_file.write_all(&write_buf[..to_write]).await?;
-        written += to_write;
+    let total_threads = size_bytes.div_ceil(DATA_PER_THREAD);
+    let mut handles = Vec::with_capacity(total_threads);
+
+    for _ in 0..total_threads {
+        let state = Arc::clone(&state);
+
+        let handle: JoinHandle<Result<()>> = tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut rng = fastrand::Rng::new();
+            let mut write_buf = vec![0u8; DATA_PER_THREAD];
+            rng.fill(&mut write_buf[..]);
+            {
+                let mut guard = state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Mutex poisoned"))?;
+                guard.writer.write_all(&write_buf[..])?;
+                guard.hasher.update(&write_buf[..]);
+            }
+            Ok(())
+        });
+        handles.push(handle);
     }
 
-    buf_file.flush().await?;
-    let checksum = hex::encode(hasher.finalize());
+    for handle in handles {
+        handle.await??;
+    }
+
+    let final_hash = {
+        let mut guard = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Mutex poisoned"))?;
+        guard.writer.flush()?;
+
+        hex::encode(std::mem::take(&mut guard.hasher).finalize())
+    };
 
     println!(
         "Generated {} with size {} MB in {}s",
@@ -50,7 +84,8 @@ async fn main() -> anyhow::Result<()> {
         size_mb,
         time.elapsed().as_secs()
     );
-    println!("SHA256 digest: {}", checksum);
+
+    println!("SHA256 digest: {final_hash}");
 
     Ok(())
 }
