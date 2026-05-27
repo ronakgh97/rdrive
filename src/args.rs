@@ -73,6 +73,10 @@ pub enum ClientCommands {
         /// Port to connect to the server (default: 3000)
         #[arg(long, default_value = "3000")]
         port: u16,
+
+        /// Frequency of echo in ms (default: 250ms)
+        #[arg(short, long, default_value = "250")]
+        freq: u64,
     },
 
     /// Upload a file to the server

@@ -5,7 +5,7 @@ Tweaking with Network Protocol & Security while building **State-of-the-art** Am
 - file-system native database `directories are just mere hash table`
 - super secure & decentralized e2e `(uses ed22519 key for identify & x25519 for encryption)`
 - layering, delta transfer push/pull
-- built-in custom TLS'ish, server secure even on raw ip port
+- built-in custom x25519 keys encryption `TLS? what is that? cloudflare? who?`
 - low memory usage, heavy in-place alloc thanks to global memory pool per connection
 - backups, versioning, secure key rotation
 - zero-trust architecture `(ssh like handshake)`
@@ -18,6 +18,7 @@ Tweaking with Network Protocol & Security while building **State-of-the-art** Am
 - no recovery keys
 - compute waste for unauthorized client access, init handshake/exchange takes some time, but maybe minor issue, idk
 - non-portable protocol, cross-lang support is a bit of chaos now
+- some protocols are not rate-limited as of now
 
 **How to set up?**
 
@@ -30,6 +31,11 @@ docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name
 ```
 
 ```shell
+# start the server
+rdrive-server serve --protocol v1 --port 3000                                 
+[Server FP] 95800f880bb76e3c614f4a3daef6a6948990a2bde87406416895d77737fffbb4
+[10:39:50][INFO] TCP Server (protocol v1) listening on 0.0.0.0:3000 (Max connections: 256)
+
 # ssh into server or go inside container, 
 # and create ~/.rdrive/authorized_keys/<sha256 public key_bytes hex> dir for whitelisting client 
 # or just ENABLE_CLIENT_WHITELIST false
@@ -66,21 +72,32 @@ Key rotated/synced successfully
 ```shell
 rdrive push --file dummy.bin --protocol v1 --port 3000
 Enter file key: ronak
-1 f5eccbbce3f740388a78375e9585c2d9 | pushed (2026-05-22 08:09:02) | pulled (never)
-2 3d5675b781c143e881cf37ec81587462 | pushed (2026-05-22 08:11:03) | pulled (never)
-3 bd9365b0de4744b388482f1fb97a82e3 | pushed (2026-05-22 08:11:36) | pulled (2026-05-22 08:11:49)
-Overwrite? [n/0]: 2
-Starting upload: dummy.bin (578.9375 mb)
-File hash: 4ea1b5d551d3876f74b6634c4dde1611a8000d798044268ea103736221e7378e
-File ID: 3d5675b781c143e881cf37ec81587462 - Network_time: 0.3446355
-````
+1 4a43afa64e9342fc8320e63a43eb193b | pushed (2026-05-27 10:41:50) | pulled (never)
+2 cf7aefc6b11d4ebd8eb87521125d3ef8 | pushed (2026-05-27 10:42:06) | pulled (never)
+3 2fef22f7725d48f59fcd2e4f554854c6 | pushed (2026-05-27 10:42:56) | pulled (2026-05-27 10:43:34)
+Overwrite? [n/0]: 1
+Starting upload: dummy.bin (2048 mb)
+File hash: b847e45da8d383833638cd57fcf7a223e0ef6c43ff2a9e12b511e6e99e30eacb
+File ID: 4a43afa64e9342fc8320e63a43eb193b - Network_time: 1.4297787s
+
+rdrive pull --protocol v1 --port 3000                 
+Enter file ID: 2fef22f7725d48f59fcd2e4f554854c6
+Enter file key: ronak
+Downloading: dummy.bin (2048 mb)
+Saved to: .\dummy.bin - Network_time: 0.0160485s
+```
+
+TLS perf
 
 ```shell
-rdrive pull --protocol v1 --port 3000                 
-Enter file ID: bd9365b0de4744b388482f1fb97a82e3
-Enter file key: ronak
-Downloading: dummy.bin (578.9375 mb)
-Saved to: .\dummy.bin - Network_time: 0.0032433
+rdrive debug --freq 10
+Session Key: daa94f41455e4108564c690af26b858d7fc29c2dadac25874142c4f675022dad
+
+Sample: 2049
+Payload: 11 MB (total 14367)
+Sha256: bb17629afedf34f395928332fb0c490846582eaa0d4f8fa95e2c8951670e3f81
+Timestamp delta: 99 ms (avg 71) # ???? idk
+RTT: 66 ms (avg 47)
 ```
 
 Layering/Delta Transfer/CAS (WIP)
@@ -163,12 +180,12 @@ TODO
 - DO some CAS magic for better storage efficiency and deduplication
 - Backup and restore features
 - Fix the MASTER_KEY/Encrption redundancy [DONE]
-- Proper secure protocol design, fuck TLS, SSL shit [Partially DONE]
+- Proper secure protocol design, fuck TLS, SSL shit [DONE]
 - Portable cross-lang protocol
 - Recoverable keys somehow?, better recover & key backups
 - Global Memory Pool per connection [DONE]
 - Internal server error feedback or other similar
-- Serialize overhead, some header does not that, fixed slice will do!!
+- Serialize overhead, some header does not that, fixed slice will do!! [DONE]
 - Rate limiting & basic guardrails
 
 https://www.backblaze.com/docs/cloud-storage-about-backblaze-b2-cloud-storage

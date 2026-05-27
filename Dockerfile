@@ -14,7 +14,7 @@ COPY src ./src
 
 RUN cargo build --release --bin rdrive-server
 
-FROM debian:13-slim
+FROM debian:stable-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

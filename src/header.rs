@@ -1,10 +1,9 @@
-use crate::{MAX_FILE_SIZE_GB, get_storage_dir};
+use crate::MAX_FILE_SIZE_GB;
 use anyhow::Result;
 use postcard::from_bytes;
 use postcard::to_allocvec;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
-use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize)]
 pub struct ClientHello {
@@ -80,83 +79,6 @@ impl EchoDebugHeader {
     }
 }
 
-use ed25519_dalek::{Verifier, VerifyingKey};
-use hex::encode;
-use sha2::{Digest, Sha512};
-
-#[derive(Serialize, Deserialize)]
-pub struct NewKeyHeader {
-    #[serde(with = "BigArray")]
-    pub signature: [u8; 64],
-    pub new_public_bytes: [u8; 32],
-}
-
-impl NewKeyHeader {
-    pub fn validate(&self, nonce: &[u8]) -> Result<()> {
-        validate_signature(&self.new_public_bytes, &self.signature, nonce)?;
-        Ok(())
-    }
-    pub fn serialize(&self) -> Result<Vec<u8>> {
-        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
-    }
-
-    pub fn deserialize(data: &[u8]) -> Result<Self> {
-        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct RotateKeyHeader {
-    #[serde(with = "BigArray")]
-    pub signature: [u8; 64],
-    pub old_public_bytes: [u8; 32],
-    pub new_public_bytes: [u8; 32],
-}
-
-impl RotateKeyHeader {
-    /// Validates the signature and checks if the old public key is registered. Returns the user path & hash512 if valid
-    pub async fn validate(&self, nonce: &[u8]) -> Result<(PathBuf, String)> {
-        let old_pub_key = VerifyingKey::from_bytes(&self.old_public_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to construct old public key from bytes: {}", e))?;
-
-        let old_pub_key_hash = encode(Sha512::digest(old_pub_key.as_bytes()));
-        let old_user_path = get_storage_dir().await?.join(&old_pub_key_hash);
-
-        if !old_user_path.exists() {
-            return Err(anyhow::anyhow!("User not registered, not found"));
-        }
-
-        validate_signature(&self.old_public_bytes, &self.signature, nonce)?;
-        Ok((old_user_path, old_pub_key_hash))
-    }
-
-    pub fn serialize(&self) -> Result<Vec<u8>> {
-        to_allocvec(self).map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
-    }
-
-    pub fn deserialize(data: &[u8]) -> Result<Self> {
-        from_bytes(data).map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))
-    }
-}
-
-#[inline(always)]
-fn validate_signature(
-    public_bytes: &[u8; 32],
-    signature_bytes: &[u8; 64],
-    nonce: &[u8],
-) -> Result<()> {
-    let signature = ed25519_dalek::Signature::from_bytes(signature_bytes);
-
-    let public_key = VerifyingKey::from_bytes(public_bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to construct public key from bytes: {}", e))?;
-
-    public_key
-        .verify(nonce, &signature)
-        .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
-
-    Ok(())
-}
-
 // TODO; listen...for header..
 //  we will use some derive from secret key as nonce challenge, this prevents roundtrip
 
@@ -209,6 +131,7 @@ impl UploadHeader {
 #[derive(Serialize, Deserialize)]
 pub struct UploadResponse {
     pub file_id: String,
+    pub file_hash: String,
     pub network_time: f32,
 }
 

@@ -139,7 +139,11 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Some(ClientCommands::Debug { address, port }) => {
+        Some(ClientCommands::Debug {
+            address,
+            port,
+            freq,
+        }) => {
             if !private_key_path.exists() && !public_key_path.exists() {
                 eprintln!("No keys found, please run `rdrive key <args?>`.");
                 std::process::exit(1);
@@ -151,7 +155,7 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow!("Invalid private key length: {:?}", e))?;
             let signing_key = SigningKey::from_bytes(&key_hex);
 
-            client_echo_debug(&address, port, signing_key, &mut alloc_mem).await?;
+            client_echo_debug(&address, port, freq, signing_key, &mut alloc_mem).await?;
         }
         Some(ClientCommands::Push {
             file,
@@ -369,10 +373,6 @@ async fn main() -> Result<()> {
             address,
             protocol,
         }) => {
-            let user_path = get_user_key_dir()?;
-            let private_key_path = user_path.join("private_key.pem");
-            let public_key_path = user_path.join("public_key.pem");
-
             if !private_key_path.exists() && public_key_path.exists() {
                 eprintln!("Public key exists but private key is missing, cannot status.");
                 std::process::exit(1);

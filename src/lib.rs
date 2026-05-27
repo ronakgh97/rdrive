@@ -160,7 +160,6 @@ pub struct FileHistory {
 
 #[derive(Deserialize, Serialize, Default)]
 pub struct Catalog {
-    // TODO: key should be file hash not name
     pub file_map: HashMap<String, FileHistory>,
     pub file_index: HashMap<String, Vec<String>>,
 }
@@ -171,10 +170,9 @@ impl Catalog {
         Ok(serde_json::from_str(&str)?)
     }
     async fn write(&mut self, path: &PathBuf) -> Result<()> {
-        use postcard::to_allocvec;
-
-        let bytes = to_allocvec(self)?;
-        tokio::fs::write(path, bytes).await?;
+        let str = serde_json::to_string_pretty(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize catalog to JSON: {}", e))?;
+        tokio::fs::write(path, str).await?;
         Ok(())
     }
 
@@ -244,8 +242,8 @@ pub struct AuthServerMap {
 
 impl AuthServerMap {
     async fn read(path: &PathBuf) -> Result<Self> {
-        let str_text = tokio::fs::read_to_string(path).await?;
-        Ok(serde_json::from_str(&str_text)?)
+        let str = tokio::fs::read_to_string(path).await?;
+        Ok(serde_json::from_str(&str)?)
     }
     pub async fn read_or_create(path: &PathBuf) -> Result<Self> {
         let server_map = path
@@ -262,8 +260,7 @@ impl AuthServerMap {
     }
 
     pub async fn write(&mut self, path: &PathBuf) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize server map to JSON: {}", e))?;
+        let json = serde_json::to_string_pretty(self)?;
         tokio::fs::write(path, json).await?;
         Ok(())
     }

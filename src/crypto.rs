@@ -142,6 +142,27 @@ pub fn generate_ed25519_keypair() -> Result<(SigningKey, VerifyingKey)> {
     Ok((private_key, public_key))
 }
 
+/// Validates that the provided `signature_bytes` is a valid signature of `nonce` using the Ed25519 public key represented by `public_bytes`.
+/// returns the `VerifyingKey` if the signature is valid, or an error if the signature is invalid or if there are issues constructing the key or signature from bytes
+#[inline(always)]
+pub async fn validate_signature(
+    public_bytes: &[u8],
+    signature_bytes: &[u8],
+    nonce: &[u8],
+) -> Result<VerifyingKey> {
+    let signature = ed25519_dalek::Signature::try_from(signature_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to construct signature from bytes: {}", e))?;
+
+    let public_key = VerifyingKey::try_from(public_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to construct public key from bytes: {}", e))?;
+
+    public_key
+        .verify_strict(nonce, &signature)
+        .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
+
+    Ok(public_key)
+}
+
 /// Generates and returns a new X25519 keypair (private_key, public_key)
 #[inline(always)]
 pub fn generate_x25519_keypair() -> Result<(EphemeralSecret, PublicKey)> {
