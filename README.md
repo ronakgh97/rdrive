@@ -87,17 +87,17 @@ Downloading: dummy.bin (2048 mb)
 Saved to: .\dummy.bin - Network_time: 0.0160485s
 ```
 
-TLS perf
+TLS & Protocol perf
 
 ```shell
-rdrive debug --freq 10
-Session Key: daa94f41455e4108564c690af26b858d7fc29c2dadac25874142c4f675022dad
+rdrive debug --freq 50 
+Session Key: c40d8d17e9818c8fd0849f1be187f3f86d2fa119a45e945533c6e77846463aa2
 
-Sample: 2049
-Payload: 11 MB (total 14367)
-Sha256: bb17629afedf34f395928332fb0c490846582eaa0d4f8fa95e2c8951670e3f81
-Timestamp delta: 99 ms (avg 71) # ???? idk
-RTT: 66 ms (avg 47)
+Sample: 5354
+Payload [1MB..14MB]: 7 MB (total 37606)
+Sha256: 724ccd1a12eca4c6a2ad5892f89115eb77afa18e64348cb41b79d5a2eb6cbfea
+Server Time: 156 ms (avg 155)
+RTT: 93 ms (avg 92) 
 ```
 
 Layering/Delta Transfer/CAS (WIP)

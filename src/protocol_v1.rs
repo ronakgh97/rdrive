@@ -525,13 +525,15 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         let ed22519_pub = VerifyingKey::from_bytes(&SERVER_PUB_KEY_BYTES)?;
 
         // construct data to be signed
-        let mut data_signed = [0u8; 128];
-        data_signed[0..32].copy_from_slice(&client_hello.nonce);
-        data_signed[32..64].copy_from_slice(&nonce);
-        data_signed[64..96].copy_from_slice(&client_hello.x22519_key);
-        data_signed[96..128].copy_from_slice(&x25519_pub.to_bytes());
+        let mut signed_transcript = [0u8; 128];
+        signed_transcript[0..32].copy_from_slice(&client_hello.nonce);
+        signed_transcript[32..64].copy_from_slice(&nonce);
+        signed_transcript[64..96].copy_from_slice(&client_hello.x22519_key);
+        signed_transcript[96..128].copy_from_slice(&x25519_pub.to_bytes());
 
-        let signature = ed22519_pri.sign_async(&data_signed).await?;
+        let signature = ed22519_pri
+            .sign_async(&Sha512::digest(signed_transcript))
+            .await?;
 
         ServerHello {
             ed25519_key: ed22519_pub.to_bytes(),
@@ -560,8 +562,6 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     // explicit flush b4 only read
     writer.flush().await?;
-
-    // TODO: key headers in auth are bloated, we can use this later
 
     // read signature & key both
     let mut packet = vec![0u8; 96];
@@ -601,6 +601,7 @@ async fn handle_echo_debug<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
     loop {
+        let server_process_ms = Instant::now();
         // read any payload
         let payload = match read_encrypt_data_into(reader, session_key, mem_pool).await {
             Ok(p) => p,
@@ -625,7 +626,6 @@ async fn handle_echo_debug<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
             }
         };
 
-        let time_process_ms = Instant::now();
         match payload {
             b"" | b" " | b"q" | b"quit" | b"exit" => {
                 return Ok(());
@@ -634,7 +634,7 @@ async fn handle_echo_debug<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 let echo = EchoDebugHeader {
                     payload_len: payload.len() as u32,
                     payload_hash: Sha256::digest(payload).into(),
-                    process_ms: time_process_ms.elapsed().as_millis(),
+                    process_ms: server_process_ms.elapsed().as_millis(),
                 };
 
                 timeout(
@@ -1200,6 +1200,7 @@ async fn client_handshake_helper(
     host: &str,
     port: u16,
     signing_key: &SigningKey,
+    should_trust: bool,
 ) -> Result<([u8; 32], TcpStream)> {
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true)?;
@@ -1234,26 +1235,69 @@ async fn client_handshake_helper(
         ServerHello::deserialize(&server_hello_data)?
     };
 
-    // we check server_map, proceed with caller handler or reject
-    let mut authorized_server =
-        AuthServerMap::read_or_create(&get_authorized_server_map_path()?).await?;
+    // now this part is client's approval
 
-    let server_key = VerifyingKey::from_bytes(&server_hello.ed25519_key)?;
-    let server_key_hex = encode(server_hello.ed25519_key);
-    let server_key_fp = encode(Sha256::digest(server_key_hex.as_bytes()));
+    let approved_server_key = {
+        // we check server_map, proceed with caller handler or reject
+        let mut authorized_server =
+            AuthServerMap::read_or_create(&get_authorized_server_map_path()?).await?;
 
-    // determine trusted key
-    let trusted_key = if let Some(existing_server_key_hex) =
-        authorized_server.server_map.get(&server_ip)
-    {
-        if existing_server_key_hex != &server_key_hex {
-            println!("WARNING: Server key changed for {}", server_ip);
-            println!(
-                "Before FP: {}",
-                encode(Sha256::digest(existing_server_key_hex.as_bytes()))
-            );
-            println!("After FP: {}", server_key_fp);
-            print!("Trust new key? [y/N]: ");
+        let server_key = VerifyingKey::from_bytes(&server_hello.ed25519_key)?;
+        let server_key_hex = encode(server_hello.ed25519_key);
+        let server_key_fp = encode(Sha256::digest(server_key_hex.as_bytes()));
+
+        // just save, prompt will not appear anyway
+        if should_trust {
+            authorized_server
+                .server_map
+                .insert(server_ip, server_key_hex.clone());
+            authorized_server
+                .write(&get_authorized_server_map_path()?)
+                .await?;
+        }
+
+        // determine trusted key by ip
+        if let Some(existing_server_key_hex) = authorized_server.server_map.get(&server_ip) {
+            if existing_server_key_hex != &server_key_hex {
+                println!("WARNING: Server key changed for {}", server_ip);
+                println!(
+                    "Before FP: {}",
+                    encode(Sha256::digest(existing_server_key_hex.as_bytes()))
+                );
+                println!("After FP: {}", server_key_fp);
+                print!("Trust new key? [y/N]: ");
+
+                io::Write::flush(&mut io::stdout())?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    stream.shutdown().await?; // instant close, server gets graceful EOF
+                    drop(stream);
+                    anyhow::bail!("User rejected rotated server key");
+                }
+
+                // replace & save stored key
+                authorized_server
+                    .server_map
+                    .insert(server_ip, server_key_fp);
+                authorized_server
+                    .write(&get_authorized_server_map_path()?)
+                    .await?;
+
+                server_key
+            } else {
+                // use already trusted stored key
+                let key_bytes: [u8; 32] =
+                    decode(existing_server_key_hex)?.try_into().map_err(|e| {
+                        anyhow::anyhow!("Failed to decode existing server 32bytes key: {:?}", e)
+                    })?;
+                VerifyingKey::from_bytes(&key_bytes)?
+            }
+        } else {
+            println!("Unknown Server IP: {}", server_ip);
+            println!("Server key FP: {}", server_key_fp);
+            print!("Trust this server? [y/N]: ");
 
             io::Write::flush(&mut io::stdout())?;
             let mut input = String::new();
@@ -1262,67 +1306,37 @@ async fn client_handshake_helper(
             if !input.trim().eq_ignore_ascii_case("y") {
                 stream.shutdown().await?; // instant close, server gets graceful EOF
                 drop(stream);
-                anyhow::bail!("User rejected rotated server key");
+                anyhow::bail!("User rejected unknown server");
             }
 
-            // replace & save stored key
+            // insert & save
             authorized_server
                 .server_map
-                .insert(server_ip, server_key_fp);
+                .insert(server_ip, server_key_hex);
             authorized_server
                 .write(&get_authorized_server_map_path()?)
                 .await?;
 
             server_key
-        } else {
-            // use already trusted stored key
-            let key_bytes: [u8; 32] = decode(existing_server_key_hex)?.try_into().map_err(|e| {
-                anyhow::anyhow!("Failed to decode existing server 32bytes key: {:?}", e)
-            })?;
-            VerifyingKey::from_bytes(&key_bytes)?
         }
-    } else {
-        println!("Unknown Server IP: {}", server_ip);
-        println!("Server key FP: {}", server_key_fp);
-        print!("Trust this server? [y/N]: ");
-
-        io::Write::flush(&mut io::stdout())?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-
-        if !input.trim().eq_ignore_ascii_case("y") {
-            stream.shutdown().await?; // instant close, server gets graceful EOF
-            drop(stream);
-            anyhow::bail!("User rejected unknown server");
-        }
-
-        // insert & save
-        authorized_server
-            .server_map
-            .insert(server_ip, server_key_hex);
-        authorized_server
-            .write(&get_authorized_server_map_path()?)
-            .await?;
-
-        server_key
     };
 
     // construct signed payload SAME AS SERVER
-    let mut data_signed = [0u8; 128];
-    data_signed[0..32].copy_from_slice(&client_hello.nonce);
-    data_signed[32..64].copy_from_slice(&server_hello.nonce);
-    data_signed[64..96].copy_from_slice(&x25519_pub.to_bytes());
-    data_signed[96..128].copy_from_slice(&server_hello.x22519_key);
+    let mut transcript_signed = [0u8; 128];
+    transcript_signed[0..32].copy_from_slice(&client_hello.nonce);
+    transcript_signed[32..64].copy_from_slice(&server_hello.nonce);
+    transcript_signed[64..96].copy_from_slice(&x25519_pub.to_bytes());
+    transcript_signed[96..128].copy_from_slice(&server_hello.x22519_key);
 
     // verify signature
     let signature = Signature::from_bytes(&server_hello.signature);
 
-    trusted_key
-        .verify_async(&data_signed, &signature)
+    approved_server_key
+        .verify_async(&Sha512::digest(transcript_signed), &signature)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to verify server's signature: {}", e))?;
 
-    // do nonce challenge here, saves us from doing per header handlers
+    // do the separate nonce challenge here, saves us from doing per header handlers
     let mut nonce = vec![0u8; 64];
     read_raw_data_into(&mut reader, &mut nonce).await?; // read nonce challenge
 
@@ -1360,7 +1374,7 @@ pub async fn client_echo_debug(
     signing_key: SigningKey,
     mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
-    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key)
+    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key, false)
         .await
         .map_err(|e| anyhow::anyhow!("Handshake failed: {}", e))?;
 
@@ -1389,13 +1403,13 @@ pub async fn client_echo_debug(
 
     // TODO; add some guardrails
     loop {
+        let send_time = Instant::now();
         let range = 1024 * 1024..=14 * 1024 * 1024;
         // randomize
         let rand_len = rng().random_range(range);
         rand_payload_buf.resize(rand_len, 0);
         rand.fill_bytes(&mut rand_payload_buf);
 
-        let send_time = Instant::now();
         write_encrypt_frame(&mut writer, &rand_payload_buf, &session_key, mem_pool)
             .await
             .context("Failed to send echo payload")?;
@@ -1433,7 +1447,7 @@ pub async fn client_echo_debug(
         }
 
         pb.set_message(format!(
-            "Sample: {}\nPayload [1MB..14MB]: {} MB (total {})\nSha256: {}\nServer IO: {} ms (avg {})\nRTT: {} ms (avg {})",
+            "Sample: {}\nPayload [1MB..14MB]: {} MB (total {})\nSha256: {}\nServer Time: {} ms (avg {})\nRTT: {} ms (avg {})",
             record_count, payload_mb, payload_acc,
             encode(echo.payload_hash), echo.process_ms,
             avg_pt, rtt.as_millis(), avg_rtt
@@ -1456,7 +1470,7 @@ pub async fn auth_client(
     port: u16,
     mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
-    let (session_key, mut stream) = client_handshake_helper(host, port, &private_key)
+    let (session_key, mut stream) = client_handshake_helper(host, port, &private_key, false)
         .await
         .map_err(|e| anyhow::anyhow!("Handshake failed: {}", e))?;
     let (reader, writer) = stream.split();
@@ -1531,7 +1545,7 @@ pub async fn upload_client(
     let file_size = metadata.len();
 
     // do handshake
-    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key)
+    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key, false)
         .await
         .map_err(|e| anyhow::anyhow!("Handshake failed: {}", e))?;
     let (reader, writer) = stream.split();
@@ -1644,7 +1658,7 @@ pub async fn download_client(
     signing_key: SigningKey,
     mem_pool: &mut Vec<u8>,
 ) -> Result<PathBuf> {
-    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key)
+    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key, false)
         .await
         .map_err(|e| anyhow::anyhow!("Handshake failed: {}", e))?;
     let (reader, writer) = stream.split();
@@ -1747,7 +1761,7 @@ pub async fn get_server_status(
     signing_key: SigningKey,
     mem_pool: &mut Vec<u8>,
 ) -> Result<StatusHeader> {
-    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key)
+    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key, false)
         .await
         .map_err(|e| anyhow::anyhow!("Handshake failed: {}", e))?;
     let (reader, writer) = stream.split();
