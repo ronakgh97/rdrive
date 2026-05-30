@@ -63,9 +63,9 @@ pub enum ClientCommands {
         rot: bool,
     },
 
-    /// Loop Echo debug info from the server, including latency and server time,
-    /// this is useful for testing connectivity and latency, configurable using ENABLE_ECHO
-    Debug {
+    /// Run perf test with multiple worker clients,
+    /// this will run tls-handshake/s, payload integrity, encryption cost, memory pooling stressing and connectivity
+    Perf {
         /// Address of the server to connect to (default: 127.0.0.1)
         #[arg(long, default_value = "127.0.0.1")]
         address: String,
@@ -74,9 +74,13 @@ pub enum ClientCommands {
         #[arg(long, default_value = "3000")]
         port: u16,
 
-        /// Frequency of echo in ms (default: 250ms)
-        #[arg(short, long, default_value = "250")]
-        freq: u64,
+        /// Number of worker client threads (default: 12)
+        #[arg(short, long, default_value = "12")]
+        n: usize,
+
+        /// Sampling duration of each test in minutes (default: 2)
+        #[arg(short, long, default_value = "2")]
+        sample: u64,
     },
 
     /// Upload a file to the server

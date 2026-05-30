@@ -6,12 +6,13 @@ use hex::{decode, encode};
 use r_drive::args::{ClientArgs, ClientCommands};
 use r_drive::crypto::generate_ed25519_keypair;
 use r_drive::protocol_v1::{
-    auth_client, client_echo_debug, download_client as download_file_v1, get_server_status,
+    auth_client, client_echo_perf, download_client as download_file_v1, get_server_status,
     upload_client as upload_file_v1,
 };
 use r_drive::{Catalog, ascii_art, get_catalog_path, get_user_key_dir};
 use sha2::{Digest, Sha256};
 use std::io;
+use std::time::Duration;
 use uuid::Uuid;
 
 #[tokio::main]
@@ -139,10 +140,11 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Some(ClientCommands::Debug {
+        Some(ClientCommands::Perf {
             address,
             port,
-            freq,
+            n,
+            sample: freq,
         }) => {
             if !private_key_path.exists() && !public_key_path.exists() {
                 eprintln!("No keys found, please run `rdrive key <args?>`.");
@@ -155,7 +157,15 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow!("Invalid private key length: {:?}", e))?;
             let signing_key = SigningKey::from_bytes(&key_hex);
 
-            client_echo_debug(&address, port, freq, signing_key, &mut alloc_mem).await?;
+            client_echo_perf(
+                &address,
+                port,
+                signing_key,
+                &mut alloc_mem,
+                n,
+                Duration::from_mins(freq),
+            )
+            .await?;
         }
         Some(ClientCommands::Push {
             file,

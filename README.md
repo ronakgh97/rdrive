@@ -90,14 +90,21 @@ Saved to: .\dummy.bin - Network_time: 0.0160485s
 TLS & Protocol perf
 
 ```shell
-rdrive debug --freq 50 
-Session Key: c40d8d17e9818c8fd0849f1be187f3f86d2fa119a45e945533c6e77846463aa2
+rdrive perf --sample 1
+Perf testing TLS Handshake, sampling for 60s
+Port: 58078 Sample count: 7985                                                                           Samples: 8000
+Success: 8000 Failed: 0
+H/s: 347
+p50: 2.76 ms
+p95: 3.68 ms
+p99: 4.91 ms
 
-Sample: 5354
-Payload [1MB..14MB]: 7 MB (total 37606)
-Sha256: 724ccd1a12eca4c6a2ad5892f89115eb77afa18e64348cb41b79d5a2eb6cbfea
-Server Time: 156 ms (avg 155)
-RTT: 93 ms (avg 92) 
+Perf testing encrypted protocol, sampling for 60s
+Session Key: 710c4cc080125c43ddf2f8e30563f21f237e6fd502b4a590788f942d9ba9f315
+Sample count: 643
+Total payload: 4542MB
+Server time avg: 92ms
+Network time avg: 89ms
 ```
 
 Layering/Delta Transfer/CAS (WIP)

@@ -152,7 +152,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
 
             match *ENABLE_ECHO {
                 true => {
-                    handle_echo_debug(&mut reader, &mut writer, &session_key, &mut global_pool)
+                    handle_echo_perf(&mut reader, &mut writer, &session_key, &mut global_pool)
                         .await?;
                     writer.flush().await?;
                     Ok(())
@@ -556,8 +556,6 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let mut nonce = [0u8; 64];
     rng().fill_bytes(&mut nonce);
     nonce = Sha512::digest(nonce).into();
-    nonce = Sha512::digest(nonce).into();
-    nonce = Sha512::digest(nonce).into();
     write_raw_frame(writer, &nonce).await?;
 
     // explicit flush b4 only read
@@ -594,12 +592,13 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 // TODO: do a proper tls perf & data throughput test
 
 /// Handle ECHO command: read encrypted payloads in a loop, respond with payload hash and server timestamp, until client sends quit command or disconnects
-async fn handle_echo_debug<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+async fn handle_echo_perf<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
     writer: &mut W,
     session_key: &[u8; 32],
     mem_pool: &mut Vec<u8>,
 ) -> Result<()> {
+    //TODO: add som rate limit, guardrails stuffs
     loop {
         let server_process_ms = Instant::now();
         // read any payload
@@ -1366,15 +1365,91 @@ async fn client_handshake_helper(
     Ok((session_key, stream))
 }
 
-/// Client function to perform echo debug: connect to server, do handshake, send echo command, then continuously send random payloads and print server response with RTT and timestamp gap
-pub async fn client_echo_debug(
+#[allow(unused)]
+/// Client function to test echo performance: connect to server, perform handshake, send random payloads of varying sizes, measure RTT and server processing time, verify response integrity, print stats, repeat until duration elapses
+pub async fn client_echo_perf(
     host: &str,
     port: u16,
-    freq: u64,
     signing_key: SigningKey,
     mem_pool: &mut Vec<u8>,
+    worker: usize, // TODO; implement this
+    sample_duration: Duration,
 ) -> Result<()> {
-    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key, false)
+    const MAX_RECORD: usize = 1024;
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(ProgressStyle::with_template("{msg}")?);
+
+    // perf tls handshake first
+    let sample_start = Instant::now();
+
+    const HANDSHAKE_CAP: u128 = 8000; // OS safe
+    let mut hss = 0;
+    let mut hsf = 0;
+    let mut latency_ms_min = 0;
+    let mut latency_ms_avg = 0;
+    let mut latency_ms_max = 0;
+
+    let mut latencies = Vec::with_capacity(4096);
+
+    println!(
+        "Perf testing TLS Handshake, sampling for {:?}",
+        sample_duration
+    );
+    while sample_start.elapsed() < sample_duration && hss < HANDSHAKE_CAP {
+        let latency_clock = Instant::now();
+        match client_handshake_helper(host, port, &signing_key, true).await {
+            Ok((session_key, mut stream)) => {
+                let elapsed_us = latency_clock.elapsed().as_micros();
+                latencies.push(elapsed_us);
+                hss += 1;
+                pb.set_message(format!(
+                    "Port: {} Sample count: {}",
+                    stream.local_addr()?.port(),
+                    hss + hsf,
+                ));
+
+                stream.shutdown().await.ok();
+                drop(stream);
+            }
+            Err(e) => {
+                if let Some(io_err) = e.downcast_ref::<io::Error>() {
+                    match io_err.kind() {
+                        io::ErrorKind::AddrInUse | io::ErrorKind::AddrNotAvailable => {
+                            eprintln!("\nOut of ports!!!, Exiting...");
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                hsf += 1;
+                continue;
+            }
+        }
+    }
+
+    let sample_elapsed_ms = sample_start.elapsed().as_secs_f64() as u128;
+    let handshake_per_sec = hss / sample_elapsed_ms;
+
+    // sort latencies
+    latencies.sort_unstable();
+
+    let p50 = latencies[(latencies.len() * 50) / 100] as f64 / 1000.0;
+    let p95 = latencies[(latencies.len() * 95) / 100] as f64 / 1000.0;
+    let p99 = latencies[(latencies.len() * 99) / 100] as f64 / 1000.0;
+
+    println!(
+        "Samples: {}\nSuccess: {} Failed: {}\nH/s: {:.2}\np50: {:.2} ms\np95: {:.2} ms\np99: {:.2} ms\n",
+        hss + hsf,
+        hss,
+        hsf,
+        handshake_per_sec,
+        p50,
+        p95,
+        p99
+    );
+
+    let (session_key, mut stream) = client_handshake_helper(host, port, &signing_key, true)
         .await
         .map_err(|e| anyhow::anyhow!("Handshake failed: {}", e))?;
 
@@ -1384,33 +1459,35 @@ pub async fn client_echo_debug(
 
     let request = Command::Echo.serialize()?;
     write_encrypt_frame(&mut writer, &request, &session_key, mem_pool).await?;
-
     //TODO; read any err or rej
 
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(ProgressStyle::with_template("{msg}")?);
-
-    println!("Session Key: {}\n", encode(session_key).green());
-
+    let sample_start = Instant::now();
     let mut rand = rng();
-    let dur = Duration::from_millis(freq);
-    const MAX_RECORD: usize = 128;
+
+    const LH: usize = 1024 * 1024;
+    const HI: usize = 14 * 1024 * 1024;
+    // TODO; implement p50, p95, p99 metrics
     let mut record_count = 0;
     let mut payload_acc = 0;
-    let mut rand_payload_buf = vec![0u8; 1024 * 1024];
+    let mut final_avg_st = 0;
+    let mut final_avg_nt = 0;
+    let mut rand_payload = vec![0u8; HI];
     let mut record_process_time = [0u128; MAX_RECORD];
     let mut record_rtt = [0u128; MAX_RECORD];
 
-    // TODO; add some guardrails
-    loop {
+    println!(
+        "Perf testing encrypted protocol, sampling for {:?}",
+        sample_duration
+    );
+    println!("Session Key: {}", encode(session_key));
+    while sample_duration > sample_start.elapsed() {
         let send_time = Instant::now();
-        let range = 1024 * 1024..=14 * 1024 * 1024;
-        // randomize
+        let range = LH..=HI;
         let rand_len = rng().random_range(range);
-        rand_payload_buf.resize(rand_len, 0);
-        rand.fill_bytes(&mut rand_payload_buf);
+        rand_payload.resize(rand_len, 0);
+        rand.fill_bytes(&mut rand_payload);
 
-        write_encrypt_frame(&mut writer, &rand_payload_buf, &session_key, mem_pool)
+        write_encrypt_frame(&mut writer, &rand_payload, &session_key, mem_pool)
             .await
             .context("Failed to send echo payload")?;
 
@@ -1426,18 +1503,18 @@ pub async fn client_echo_debug(
         record_process_time[record_count % MAX_RECORD] = echo.process_ms;
         record_rtt[record_count % MAX_RECORD] = rtt.as_millis();
 
-        let avg_pt = record_process_time
+        let avg_st = record_process_time
             .iter()
             .take((record_count + 1).min(MAX_RECORD))
             .sum::<u128>()
             / (record_count + 1).min(MAX_RECORD) as u128;
-        let avg_rtt = record_rtt
+        let avg_nt = record_rtt
             .iter()
             .take((record_count + 1).min(MAX_RECORD))
             .sum::<u128>()
             / (record_count + 1).min(MAX_RECORD) as u128;
 
-        let compute_payload_hash = encode(Sha256::digest(&rand_payload_buf));
+        let compute_payload_hash = encode(Sha256::digest(&rand_payload));
         if compute_payload_hash != encode(echo.payload_hash) {
             eprintln!(
                 "Payload hash mismatch! Sent: {}, Received: {}",
@@ -1447,16 +1524,29 @@ pub async fn client_echo_debug(
         }
 
         pb.set_message(format!(
-            "Sample: {}\nPayload [1MB..14MB]: {} MB (total {})\nSha256: {}\nServer Time: {} ms (avg {})\nRTT: {} ms (avg {})",
-            record_count, payload_mb, payload_acc,
+            "Sample: {}\nPayload [{}mb..{}mb]: {} MB (total {})\nSha256: {}\nServer time: {} ms (avg {})\nNT: {} ms (avg {})",
+            record_count, LH / (1024 * 1024), HI / (1024 * 1024),
+            payload_mb, payload_acc,
             encode(echo.payload_hash), echo.process_ms,
-            avg_pt, rtt.as_millis(), avg_rtt
+            avg_st, rtt.as_millis(), avg_nt
         ));
 
         record_count += 1;
         payload_acc += echo.payload_len / (1024 * 1024);
-        tokio::time::sleep(dur).await;
+
+        final_avg_st = avg_st;
+        final_avg_nt = avg_nt;
     }
+    pb.finish_and_clear();
+
+    // print final stats
+    println!(
+        "Sample: {}\nTotal Payload: {}MB\nServer time avg: {}ms\nNetwork Time avg: {}ms",
+        record_count, payload_acc, final_avg_st, final_avg_nt
+    );
+
+    stream.shutdown().await?;
+    Ok(())
 }
 
 // TODO: Too many repetitive lazy code, very poor thinking, refactor later
