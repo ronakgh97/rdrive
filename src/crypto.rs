@@ -110,7 +110,7 @@ pub fn decrypt_into(input: &[u8], output: &mut [u8], key: &[u8; 32]) -> Result<u
 
     cipher
         .decrypt_inout_detached(&nonce, b"", data.into(), &tag)
-        .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     Ok(ciphertext_len)
 }

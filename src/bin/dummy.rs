@@ -1,6 +1,7 @@
 // TODO: Can be improved????
 
 use anyhow::Result;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -50,9 +51,9 @@ async fn main() -> Result<()> {
         let state = Arc::clone(&state);
 
         let handle: JoinHandle<Result<()>> = tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut rng = fastrand::Rng::new();
+            let mut rng = rand::rng();
             let mut write_buf = vec![0u8; DATA_PER_THREAD];
-            rng.fill(&mut write_buf[..]);
+            rng.fill_bytes(&mut write_buf[..]);
             {
                 let mut guard = state
                     .lock()

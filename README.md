@@ -87,27 +87,28 @@ Downloading: dummy.bin (2048 mb)
 Saved to: .\dummy.bin - Network_time: 0.0160485s
 ```
 
-TLS & Protocol perf
+**TLS & Protocol perf**
 
 ```shell
 rdrive perf --sample 1
 Perf testing TLS Handshake, sampling for 60s
-Port: 58078 Sample count: 7985                                                                           Samples: 8000
-Success: 8000 Failed: 0
-H/s: 347
-p50: 2.76 ms
-p95: 3.68 ms
-p99: 4.91 ms
+Port: 53911 Sample count: 8192                                                           
+Samples: 8192
+Success: 8192 Failed: 0
+H/s: 372
+p50: 2.59 ms
+p95: 3.41 ms
+p99: 4.70 ms
 
 Perf testing encrypted protocol, sampling for 60s
-Session Key: 710c4cc080125c43ddf2f8e30563f21f237e6fd502b4a590788f942d9ba9f315
-Sample count: 643
-Total payload: 4542MB
-Server time avg: 92ms
-Network time avg: 89ms
+Session Key: 05c9b5c66195d57aa6407807537e101da19fcaeca1d350db84989f4ec751e9c4
+Sample: 644
+Total payload: 4419MB
+Server Time avg: 92ms # (~3ms in-flight-processing)
+Network Time avg: 89ms (p50: 89 p95: 94 p99: 101)
 ```
 
-Layering/Delta Transfer/CAS (WIP)
+**Layering/Delta Transfer**/CAS (WIP)
 
 ```shell
 running 1 test
@@ -166,7 +167,7 @@ TODO
 - Better Encryption for storage and metadata
 - Better Bandwidth tracking and limits [DONE]
 - Better Error handling and logging [DONE]
-- Thread pool for better concurrency and resource management
+- Thread pool for better concurrency and resource management [Partially DONE]
 - Better file management and cleanup strategies [Partially DONE]
 - Authentication and access control [Partially DONE]
 - Fix and improve the buffering and streaming for large files (diff hashing, chunking, chopping, etc.)

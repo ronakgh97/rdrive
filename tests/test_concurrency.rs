@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use r_drive::crypto::generate_ed25519_keypair;
 use r_drive::protocol_v1::{download_client, upload_client};
 use r_drive::{
@@ -203,7 +204,7 @@ async fn test_concurrency_v1() {
 
         tasks.spawn(async move {
             let (client_key, _) = generate_ed25519_keypair().unwrap();
-            let mut pool = vec![0u8; 4 * 1024 * 1024];
+            let mut pool = BytesMut::with_capacity(1024 * 1024 * 4);
             let uuid = Uuid::new_v4().simple().to_string();
             let file_key = format!("key_{}", i);
 

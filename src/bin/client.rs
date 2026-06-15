@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use bytes::BytesMut;
 use clap::Parser;
 use colored::Colorize;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -18,7 +19,8 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = ClientArgs::parse();
-    let mut alloc_mem = vec![0u8; 32 * 1024 * 1024];
+    let mut mem_pool = BytesMut::with_capacity(1024 * 1024 * 32);
+    mem_pool.resize(1024 * 1024 * 32, 0);
 
     let user_path = get_user_key_dir()?;
     let private_key_path = user_path.join("private_ed25519.key");
@@ -72,7 +74,7 @@ async fn main() -> Result<()> {
                     Some(old_public_key),
                     &address,
                     port,
-                    &mut alloc_mem,
+                    &mut mem_pool,
                 )
                 .await?;
 
@@ -130,7 +132,7 @@ async fn main() -> Result<()> {
                     None,
                     &address,
                     port,
-                    &mut alloc_mem,
+                    &mut mem_pool,
                 )
                 .await?;
             } else {
@@ -161,7 +163,7 @@ async fn main() -> Result<()> {
                 &address,
                 port,
                 signing_key,
-                &mut alloc_mem,
+                &mut mem_pool,
                 n,
                 Duration::from_mins(freq),
             )
@@ -260,7 +262,7 @@ async fn main() -> Result<()> {
                         &address,
                         port,
                         signing_key,
-                        &mut alloc_mem,
+                        &mut mem_pool,
                     )
                     .await?
                 }
@@ -331,7 +333,7 @@ async fn main() -> Result<()> {
                         &address,
                         port,
                         signing_key,
-                        &mut alloc_mem,
+                        &mut mem_pool,
                     )
                     .await?;
 
@@ -397,7 +399,7 @@ async fn main() -> Result<()> {
             match protocol.as_str() {
                 "v1" => {
                     let status =
-                        get_server_status(&address, port, signing_key, &mut alloc_mem).await?;
+                        get_server_status(&address, port, signing_key, &mut mem_pool).await?;
 
                     println!("Status timestamp: {}", status.timestamp);
                     println!("Uptime: {} hrs", status.uptime_hrs);
