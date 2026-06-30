@@ -194,7 +194,7 @@ TODO
 - Global Memory Pool per connection [DONE]
 - Internal server error feedback or other similar
 - Serialize overhead, some header does not that, fixed slice will do!! [DONE]
-- Rate limiting & basic guardrails
+- Rate limiting & basic guardrails [Partially DONE]
 
 https://www.backblaze.com/docs/cloud-storage-about-backblaze-b2-cloud-storage
 https://www.rfc-editor.org/rfc/rfc8032

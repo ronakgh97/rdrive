@@ -1,5 +1,6 @@
 #[allow(unused)]
 use crate::crypto::{decrypt_data, encrypt_data};
+use crate::ratelimit::RateLimiter;
 use anyhow::Result;
 use chrono::Local;
 use colored::Colorize;
@@ -24,6 +25,7 @@ pub mod layer;
 pub mod log;
 pub mod protocol_v1;
 pub mod protocol_v2;
+pub mod ratelimit;
 pub mod service;
 
 #[inline(always)]
@@ -286,8 +288,17 @@ pub static ENABLE_CLIENT_WHITELIST: LazyLock<bool> = LazyLock::new(|| {
         .unwrap_or(true) // default to true
 });
 
-// TODO: pem is not needed, for internal ops
-//  use bytes to form key
+pub static RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(|| {
+    let max_tokens = std::env::var("RATE_LIMIT_MAX_TOKENS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20.0);
+    let refill_rate = std::env::var("RATE_LIMIT_REFILL_RATE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10.0);
+    RateLimiter::init(max_tokens, refill_rate)
+});
 
 pub static SERVER_PUB_KEY_BYTES: LazyLock<[u8; 32]> = LazyLock::new(|| {
     let pubkey = get_server_key_dir()
@@ -415,6 +426,22 @@ pub const WRITE_CHUNK_SIZE: usize = 96 * 1024;
 // For Header only
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
+// Timeout for individual file chunk read/write operations
+pub const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
+
+// Timeout for the initial handshake (before encryption is established)
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+// Maximum time a single connection can stay open
+pub static CONNECTION_LIFETIME: LazyLock<Duration> = LazyLock::new(|| {
+    dotenv::dotenv().ok();
+    let secs = std::env::var("CONNECTION_LIFETIME_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3600u64); // 1 hour default
+    Duration::from_secs(secs)
+});
 
 pub static SERVER_TRACKER: LazyLock<Arc<RwLock<Tracker>>> =
     LazyLock::new(|| Arc::new(RwLock::new(Tracker::default())));

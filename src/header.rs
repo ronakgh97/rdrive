@@ -105,7 +105,7 @@ impl UploadHeader {
         // TODO: we dont need check or sanitized, just use hash, no more path injection
         if self.file_id.is_empty() || !(32..=256).contains(&self.file_id.len()) {
             return Err(anyhow::anyhow!(
-                "File ID must be a non-empty hex string between 32 and 256 characters, without control characters"
+                "File ID must be a non-empty string between 32 and 256 characters"
             ));
         }
         if self.file_name.is_empty() {
@@ -120,8 +120,10 @@ impl UploadHeader {
         if self.file_hash.is_empty() {
             return Err(anyhow::anyhow!("File hash cannot be empty"));
         }
-        if self.file_key.is_empty() {
-            return Err(anyhow::anyhow!("File key cannot be empty"));
+        if self.file_key.is_empty() || self.file_key.len() > 512 {
+            return Err(anyhow::anyhow!(
+                "File key must be between 1 and 512 characters"
+            ));
         }
         Ok(())
     }
@@ -156,11 +158,15 @@ impl DownloadHeader {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.file_id.is_empty() {
-            return Err(anyhow::anyhow!("File ID cannot be empty"));
+        if self.file_id.is_empty() || !(32..=256).contains(&self.file_id.len()) {
+            return Err(anyhow::anyhow!(
+                "File ID must be a non-empty string between 32 and 256 characters"
+            ));
         }
-        if self.file_key.is_empty() {
-            return Err(anyhow::anyhow!("File key cannot be empty"));
+        if self.file_key.is_empty() || self.file_key.len() > 512 {
+            return Err(anyhow::anyhow!(
+                "File key must be between 1 and 512 characters"
+            ));
         }
         Ok(())
     }

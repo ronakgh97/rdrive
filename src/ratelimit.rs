@@ -25,7 +25,7 @@ impl TokenBucket {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     /// Try to consume `cost` tokens. Returns true if allowed.
     pub fn try_consume(&mut self, cost: f64) -> bool {
         self.refill();
@@ -64,7 +64,7 @@ impl RateLimiter {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     /// Check if a request from `ip` is allowed. Consumes 1 token by default.
     pub fn is_allowed(&self, ip: &IpAddr) -> bool {
         let mut entry = self
@@ -74,7 +74,7 @@ impl RateLimiter {
         entry.try_consume(1.0)
     }
 
-    #[inline]
+    #[inline(always)]
     /// Check if a request from `ip` is allowed, consuming `cost` tokens.
     pub fn is_allowed_cost(&self, ip: &IpAddr, cost: f64) -> bool {
         let mut entry = self

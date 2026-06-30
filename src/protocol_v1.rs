@@ -1,5 +1,6 @@
 // TODO: HOLY FUCKING SHIT, THIS IS A MESS, LOGIC ARE SOUND, BUT GOD THIS IS UNREADIABLE
 
+use crate::RATE_LIMITER;
 use crate::crypto::{
     NONCE_LEN, TAG_LEN, decrypt_into, encrypt_into, generate_x25519_keypair, validate_signature,
 };
@@ -8,11 +9,12 @@ use crate::header::{
     ServerHello, StatusHeader, UploadHeader, UploadResponse, WarnHeader,
 };
 use crate::{
-    ACTIVE_CONNECTIONS, AuthServerMap, ENABLE_CLIENT_WHITELIST, ENABLE_ECHO, MAX_CONNECTIONS,
-    MetadataFile, NETWORK_READ_BUFFER, NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT,
-    SERVER_PRI_KEY_BYTES, SERVER_PUB_KEY_BYTES, SERVER_TRACKER, START_TIME, Tracker, WRITE_TIMEOUT,
-    debug, error, file_hasher_async, get_authorized_client_dir, get_authorized_server_map_path,
-    get_storage_dir, hold_file_lock, info, release_file_lock, trace, try_get_uptime_hrs, warn,
+    ACTIVE_CONNECTIONS, AuthServerMap, CHUNK_TIMEOUT, CONNECTION_LIFETIME, ENABLE_CLIENT_WHITELIST,
+    ENABLE_ECHO, HANDSHAKE_TIMEOUT, MAX_CONNECTIONS, MetadataFile, NETWORK_READ_BUFFER,
+    NETWORK_WRITE_BUFFER, READ_CHUNK_SIZE, READ_TIMEOUT, SERVER_PRI_KEY_BYTES,
+    SERVER_PUB_KEY_BYTES, SERVER_TRACKER, START_TIME, Tracker, WRITE_TIMEOUT, debug, error,
+    file_hasher_async, get_authorized_client_dir, get_authorized_server_map_path, get_storage_dir,
+    hold_file_lock, info, release_file_lock, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use bytes::BytesMut;
@@ -26,6 +28,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256, Sha512};
 use std::cmp::min;
 use std::io;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -50,29 +53,36 @@ pub async fn start_tcp_server(port: u16, storage_path: Arc<PathBuf>) -> Result<(
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                // Check connection limit
-                let current = ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
-                if current >= *MAX_CONNECTIONS {
+                // check connection limit
+                if ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed) >= *MAX_CONNECTIONS {
                     ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
                     warn!("Connection rejected (max connections): {:?}", addr);
-                    drop(stream); // Instant close
-                    tokio::time::sleep(Duration::from_millis(1250)).await; // handle abuse
+                    drop(stream); // instant close
+                    // slight timeout to avoid connection spam
+                    tokio::time::sleep(Duration::from_millis(1250)).await;
                     continue;
                 }
+
                 let storage_path = Arc::clone(&storage_path);
                 let active_connections = Arc::clone(&ACTIVE_CONNECTIONS);
                 info!("Connection request from {:?}", addr);
-                // spawn handlers
+                // spawn handlers with connection lifetime timeout
                 tokio::spawn(async move {
                     trace!("Task spawned for connection from {:?}", addr);
-                    if let Err(e) = handle_connection(stream, &storage_path).await {
-                        error!("Error handling connection from {:?}: {}", addr, e);
+                    let result = timeout(
+                        *CONNECTION_LIFETIME,
+                        handle_connection(stream, &storage_path),
+                    )
+                    .await;
+                    match result {
+                        Ok(Err(e)) => error!("Error handling connection from {:?}: {}", addr, e),
+                        Err(_) => warn!("Connection from {:?} exceeded lifetime limit", addr),
+                        Ok(Ok(())) => {}
                     }
                     active_connections.fetch_sub(1, Ordering::Release);
                 });
             }
             Err(e) => {
-                ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Release);
                 error!("Connection accept error: {}", e);
             }
         }
@@ -85,6 +95,7 @@ const HANDSHAKE_BYTES: &[u8; 20] = b"V1PROTOCOL_HANDSHAKE";
 #[inline]
 async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result<()> {
     stream.set_nodelay(true)?;
+    let client_ip = stream.peer_addr().ok().map(|addr| addr.ip());
     let (reader, writer) = stream.split();
     let mut reader = BufReader::with_capacity(NETWORK_READ_BUFFER, reader);
     let mut writer = BufWriter::with_capacity(NETWORK_WRITE_BUFFER, writer);
@@ -154,14 +165,47 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &Path) -> Result
             return Err(e);
         }
     };
+
+    // Per-Command Per-IP rate limiting (after initial handshake)
+    if let Some(ip) = &client_ip {
+        let cost = match &command {
+            Command::Status => 1.0,
+            Command::Auth(_) => 2.0,
+            Command::Upload(_) => 5.0,
+            Command::Download(_) => 5.0,
+            Command::Echo => 1.5,
+        };
+        if !RATE_LIMITER.is_allowed_cost(ip, cost) {
+            warn!("Command rate limited for {:?}", ip);
+            send_failed(
+                &mut writer,
+                ErrorHeader {
+                    code: 429,
+                    message: "Rate limit exceeded, try again later".to_string(),
+                },
+                &session_key,
+                &mut global_pool,
+            )
+            .await?;
+            writer.flush().await?;
+            return Ok(());
+        }
+    }
+
     match command {
         Command::Echo => {
             debug!("Received ECHO request");
 
             match *ENABLE_ECHO {
                 true => {
-                    handle_echo_perf(&mut reader, &mut writer, &session_key, &mut global_pool)
-                        .await?;
+                    handle_echo_perf(
+                        &mut reader,
+                        &mut writer,
+                        &session_key,
+                        &mut global_pool,
+                        client_ip,
+                    )
+                    .await?;
                     writer.flush().await?;
                     Ok(())
                 }
@@ -519,10 +563,15 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 ) -> Result<([u8; 32], [u8; 32])> {
     let (x25519_pri, x25519_pub) = generate_x25519_keypair()?;
 
-    // read client_hello
+    // read client_hello with timeout
     let client_hello = {
         let mut client_hello_data = BytesMut::with_capacity(64);
-        read_raw_data_into(reader, &mut client_hello_data).await?;
+        timeout(
+            HANDSHAKE_TIMEOUT,
+            read_raw_data_into(reader, &mut client_hello_data),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Handshake timed out reading client hello"))??;
         ClientHello::deserialize(&client_hello_data)?
     };
 
@@ -571,10 +620,12 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     // explicit flush b4 only read
     writer.flush().await?;
 
-    // read signature & key both
+    // read signature & key both with timeout
     let mut packet = BytesMut::with_capacity(96);
     packet.resize(96, 0);
-    read_raw_data_into(reader, &mut packet).await?;
+    timeout(HANDSHAKE_TIMEOUT, read_raw_data_into(reader, &mut packet))
+        .await
+        .map_err(|_| anyhow::anyhow!("Handshake timed out reading client signature"))??;
 
     let (signature, pub_key) = packet.split_at(64);
 
@@ -600,7 +651,7 @@ async fn server_handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     ))
 }
 
-// TODO: do a proper tls perf & data throughput test
+// TODO: do a proper tls perf & data throughput test, still not better
 
 /// Handle ECHO command: read encrypted payloads in a loop, respond with payload hash and server timestamp, until client sends quit command or disconnects
 async fn handle_echo_perf<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
@@ -608,15 +659,19 @@ async fn handle_echo_perf<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     session_key: &[u8; 32],
     mem_pool: &mut BytesMut,
+    #[allow(unused)] client_ip: Option<IpAddr>,
 ) -> Result<()> {
-    //TODO: add som rate limit, guardrails stuffs
     loop {
         let server_process_ms = Instant::now();
-        // read any payload
-        let payload = match read_encrypt_data_into(reader, session_key, mem_pool).await {
-            Ok(p) => p,
-            Err(e) => {
-                // eof & disconnect is fine here
+        // read any payload with per-iteration timeout
+        let payload = match timeout(
+            CHUNK_TIMEOUT,
+            read_encrypt_data_into(reader, session_key, mem_pool),
+        )
+        .await
+        {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
                 if [
                     "eof",
                     "early eof",
@@ -634,7 +689,19 @@ async fn handle_echo_perf<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 }
                 return Err(e);
             }
+            Err(_) => {
+                warn!("Echo request timed out");
+                return Ok(());
+            }
         };
+
+        // // rate limit echo requests per IP
+        // if let Some(ip) = &client_ip
+        //     && !RATE_LIMITER.is_allowed(ip)
+        // {
+        //     warn!("Echo rate limited for {:?}", ip);
+        //     return Ok(());
+        // }
 
         match payload {
             b"" | b" " | b"q" | b"quit" | b"exit" => {
@@ -985,7 +1052,12 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         while received < headers.file_size {
             let plain_text = min(READ_CHUNK_SIZE, (headers.file_size - received) as usize);
             let cipher_text = NONCE_LEN + plain_text + TAG_LEN;
-            reader.read_exact(&mut enc_buf[..cipher_text]).await?;
+            timeout(
+                CHUNK_TIMEOUT,
+                reader.read_exact(&mut enc_buf[..cipher_text]),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("Upload timed out reading chunk"))??;
             // decrypt file chunks
             let dec_len = decrypt_into(&enc_buf[..cipher_text], &mut dec_buf, session_key)?;
             hasher.update(&dec_buf[..dec_len]);
@@ -1184,7 +1256,9 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         }
         // encrypt file chunks
         let enc_len = encrypt_into(&plan_buf[..n], &mut enc_buf, session_key)?;
-        writer.write_all(&enc_buf[..enc_len]).await?;
+        timeout(CHUNK_TIMEOUT, writer.write_all(&enc_buf[..enc_len]))
+            .await
+            .map_err(|_| anyhow::anyhow!("Download timed out writing chunk"))??;
     }
 
     writer.flush().await?;
@@ -1714,9 +1788,9 @@ pub async fn upload_client(
     // TODO; encrypt locally with file-key BUT WHAT ABOUT HASH CHECK?
 
     loop {
-        let n = buf_file
-            .read(&mut plan_buf)
+        let n = timeout(CHUNK_TIMEOUT, buf_file.read(&mut plan_buf))
             .await
+            .map_err(|_| anyhow::anyhow!("Client upload timed out reading file"))?
             .context("Failed to read file data")?;
         if n == 0 {
             break;
@@ -1724,11 +1798,15 @@ pub async fn upload_client(
 
         // encrypt file chunks
         let enc_len = encrypt_into(&plan_buf[..n], &mut enc_buf, &session_key)?;
-        writer
-            // send only encrypted part
-            .write_all(&enc_buf[..enc_len])
-            .await
-            .context("Failed to send file data")?;
+        timeout(
+            CHUNK_TIMEOUT,
+            writer
+                // send only encrypted part
+                .write_all(&enc_buf[..enc_len]),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Client upload timed out sending chunk"))?
+        .context("Failed to send file data")?;
         pg_bar.inc(n as u64);
     }
 
@@ -1829,10 +1907,13 @@ pub async fn download_client(
     while received < response.file_size {
         let plain_text = min(READ_CHUNK_SIZE, (response.file_size - received) as usize);
         let cipher_text = NONCE_LEN + plain_text + TAG_LEN;
-        let n = reader
-            .read_exact(&mut enc_buf[..cipher_text])
-            .await
-            .context("Failed to read file data")?;
+        let n = timeout(
+            CHUNK_TIMEOUT,
+            reader.read_exact(&mut enc_buf[..cipher_text]),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Client download timed out reading chunk"))?
+        .context("Failed to read file data")?;
         // decrypt file chunks
         let dec_len = decrypt_into(&enc_buf[..cipher_text], &mut dec_buf, &session_key)?;
         hasher.update(&dec_buf[..dec_len]);
